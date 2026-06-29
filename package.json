@@ -1,0 +1,65 @@
+{
+  "name": "@mininglamp-oss/codex-channel-octo",
+  "version": "0.1.0",
+  "description": "Bridge OpenAI Codex (via @openai/codex-sdk) to Octo IM — independent Node.js gateway",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "codex-channel-octo": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "config.example.json",
+    "config.bot.example.json"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mininglamp-OSS/codex-channel-octo.git"
+  },
+  "homepage": "https://github.com/Mininglamp-OSS/codex-channel-octo#readme",
+  "bugs": {
+    "url": "https://github.com/Mininglamp-OSS/codex-channel-octo/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint src/ --max-warnings 0",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "^0.142.0",
+    "better-sqlite3": "^12.10.0",
+    "crypto-js": "^4.2.0",
+    "curve25519-js": "^0.0.4",
+    "md5-typescript": "^1.0.5",
+    "ws": "^8.16.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/crypto-js": "^4.2.2",
+    "@types/ws": "^8.5.14",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "@vitest/coverage-v8": "^3.0.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
