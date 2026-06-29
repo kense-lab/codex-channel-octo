@@ -11,8 +11,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'node:path';
 import { mkdtempSync, writeFileSync, rmSync, chmodSync, mkdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { loadConfig, resolveBotConfigs, loadSoul } from '../config.js';
+import { tmpdir, homedir } from 'node:os';
+import { loadConfig, resolveBotConfigs, loadSoul, expandHome } from '../config.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -682,5 +682,23 @@ describe('resolveBotConfigs zero-bot idle', () => {
     const bots = resolveBotConfigs(cfg);
     expect(bots).toHaveLength(1);
     expect(bots[0].botToken).toBe('bf_perbot');
+  });
+});
+
+describe('expandHome', () => {
+  it('returns undefined for undefined', () => {
+    expect(expandHome(undefined)).toBeUndefined();
+  });
+  it('expands a bare ~', () => {
+    expect(expandHome('~')).toBe(homedir());
+  });
+  it('expands a leading ~/', () => {
+    expect(expandHome('~/.codex')).toBe(join(homedir(), '.codex'));
+  });
+  it('leaves an absolute path untouched', () => {
+    expect(expandHome('/abs/path')).toBe('/abs/path');
+  });
+  it('does not expand a ~ that is not at the start', () => {
+    expect(expandHome('/a/~/b')).toBe('/a/~/b');
   });
 });

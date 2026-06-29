@@ -64,7 +64,12 @@ const VALID_WEB_SEARCH_MODES: Set<string> = new Set([
   'disabled', 'cached', 'live',
 ]);
 
-/** Max chars of a tool param echoed into a progress message (redaction cap). */
+/**
+ * Max chars of a progress detail emitted by this bridge (program name / file
+ * basenames / search query). Note: index.ts applies a second, smaller cap when
+ * it formats the `🔧 …` notice — this is the bridge-side bound on what leaves
+ * summarizeItem; the caller may shorten further.
+ */
 export const MAX_TOOL_PARAM_CHARS = 200;
 
 /**
@@ -197,15 +202,20 @@ export function buildThreadOptions(config: Config, cwd: string): ThreadOptions {
 
 /**
  * Write the frozen system text to <cwd>/AGENTS.md so Codex picks it up as
- * project instructions. Best-effort — a failure here must not break the turn
- * (the prompt also restates the security framing). Creates cwd if missing.
+ * project instructions. Returns true on success. The prompt also restates the
+ * security framing, so a failure is not fatal — but the caller uses the result
+ * to harden the sandbox when the write fails (a stale AGENTS.md from a prior
+ * turn could otherwise carry agent-written content under workspace-write).
+ * Creates cwd if missing.
  */
-function writeAgentsMd(cwd: string, systemPrompt: string): void {
+function writeAgentsMd(cwd: string, systemPrompt: string): boolean {
   try {
     mkdirSync(cwd, { recursive: true });
     writeFileSync(pathJoin(cwd, 'AGENTS.md'), systemPrompt, 'utf-8');
+    return true;
   } catch (err) {
     console.error(`[codex-channel-octo] failed to write AGENTS.md: ${String(err)}`);
+    return false;
   }
 }
 
@@ -214,13 +224,18 @@ export function summarizeItem(item: ThreadItem): { name: string; detail: string 
   const cap = (s: string): string =>
     s.length > MAX_TOOL_PARAM_CHARS ? s.slice(0, MAX_TOOL_PARAM_CHARS) + '…' : s;
   switch (item.type) {
-    case 'command_execution':
-      // Only the command line (capped) — never aggregated_output.
-      return { name: 'command', detail: cap(item.command) };
+    case 'command_execution': {
+      // Only the program name (first token) — NOT the full argv, which can carry
+      // secrets/paths/flags. Never the aggregated_output.
+      const prog = item.command.trim().split(/\s+/)[0] ?? 'command';
+      // Strip a leading path so "/usr/bin/git" → "git" (program identity only).
+      const base = prog.split('/').pop() || prog;
+      return { name: 'command', detail: cap(base) };
+    }
     case 'file_change': {
-      // Only file paths — never the diff content.
-      const paths = item.changes.map((c) => c.path).join(', ');
-      return { name: 'file_change', detail: cap(paths) };
+      // Only basenames — never the diff content, never full paths.
+      const names = item.changes.map((c) => c.path.split('/').pop() || c.path).join(', ');
+      return { name: 'file_change', detail: cap(names) };
     }
     case 'mcp_tool_call':
       // Only server.tool — never arguments/result.
@@ -232,13 +247,17 @@ export function summarizeItem(item: ThreadItem): { name: string; detail: string 
   }
 }
 
-/** True for item types that imply an external side effect (command/file/tool). */
+/**
+ * True for item types that mutate external state (command / file / MCP tool).
+ * web_search is intentionally excluded: it is idempotent/read-only, so a
+ * stale-resume fresh-retry after a search cannot duplicate a side effect — we
+ * keep that recovery path open. (web_search still emits a progress notice.)
+ */
 function isSideEffectItem(type: ThreadItem['type']): boolean {
   return (
     type === 'command_execution' ||
     type === 'file_change' ||
-    type === 'mcp_tool_call' ||
-    type === 'web_search'
+    type === 'mcp_tool_call'
   );
 }
 
@@ -287,7 +306,7 @@ export async function* queryAgent(
   const cwd = sessionCtx ? resolveSessionCwd(cwdBase, sessionCtx) : cwdBase;
 
   // Codex reads project instructions from AGENTS.md in the working directory.
-  writeAgentsMd(cwd, systemPrompt);
+  const agentsMdOk = writeAgentsMd(cwd, systemPrompt);
 
   const env = buildCodexEnv(config.sdk, process.env);
   const codex = new Codex({
@@ -296,15 +315,25 @@ export async function* queryAgent(
     ...(env ? { env } : {}),
   });
   const threadOpts = buildThreadOptions(config, cwd);
+  // If we could not refresh AGENTS.md this turn, force read-only: a stale file
+  // (possibly agent-written under a prior workspace-write turn) must not run
+  // with write access still granted.
+  if (!agentsMdOk && threadOpts.sandboxMode === 'workspace-write') {
+    console.warn('[codex-channel-octo] AGENTS.md refresh failed; forcing read-only sandbox this turn');
+    threadOpts.sandboxMode = 'read-only';
+  }
 
   // Restate the security framing atop the prompt (defense in depth — AGENTS.md
   // is the primary channel, this guards against it being ignored/unread).
   const promptText = `${SECURITY_PROMPT_PREFIX}\n\n---\n\n${userMessage}`;
 
-  // Detect a stale/expired resume id from the error text.
+  // Detect a stale/expired resume id from the error text. Matches only specific
+  // "session/thread missing" phrasings — NOT a bare "resume" substring, which
+  // would misfire on ordinary errors from the `codex exec resume` path (rate
+  // limits, CLI usage echoes, subprocess stderr) and wrongly drop a valid thread.
   const isResumeError = (err: unknown): boolean => {
     const m = err instanceof Error ? err.message : String(err);
-    return /thread.*not.*found|no.*(conversation|session|thread).*found|invalid.*thread|session.*not.*found|resume/i.test(m);
+    return /thread.*not.*found|no (conversation|session|thread) found|invalid.*(thread|session)|session.*not.*found|--resume requires a valid/i.test(m);
   };
 
   // Drain one Codex run. Tracks `sideEffect.seen`: set true on ANY command/file/
@@ -359,9 +388,30 @@ export async function* queryAgent(
                 }
               }
             }
+          } else if (item.type === 'web_search') {
+            // Idempotent/read-only — NOT a side effect (keeps fresh-retry open),
+            // but still surface a redacted progress notice.
+            if (onToolUse && (ev.type === 'item.started' || ev.type === 'item.completed')) {
+              const s = summarizeItem(item);
+              if (s) {
+                try {
+                  onToolUse(s.name, s.detail);
+                } catch (err) {
+                  console.error(`[codex-channel-octo] onToolUse callback threw: ${String(err)}`);
+                }
+              }
+            }
           } else if (item.type === 'agent_message') {
             if (!messages.has(item.id)) order.push(item.id);
             messages.set(item.id, item.text);
+          } else if (item.type === 'error') {
+            // An ErrorItem is a non-fatal error reported AS an item (distinct
+            // from the stream-level 'error' event). Codex may report a failed
+            // tool/model step this way without failing the whole turn. Surface
+            // it as a thrown error so the turn doesn't silently produce zero
+            // output (which would look like "no response") and so stale-resume
+            // detection can run. Any side effect already seen suppresses retry.
+            throw new Error(item.message ?? 'codex item error');
           } else if (
             (item.type === 'reasoning' || item.type === 'todo_list') &&
             onToolUse &&

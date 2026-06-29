@@ -150,33 +150,33 @@ describe('buildThreadOptions', () => {
 });
 
 describe('summarizeItem redaction', () => {
-  it('command_execution emits only the command, never output', () => {
+  it('command_execution emits only the program name, never args or output', () => {
     const s = summarizeItem({
       id: '1',
       type: 'command_execution',
-      command: 'ls -la',
+      command: '/usr/bin/git push --force origin main',
       aggregated_output: 'SECRET',
       status: 'completed',
     });
-    expect(s).toEqual({ name: 'command', detail: 'ls -la' });
+    // Only the program basename — args (which can carry secrets/paths) stripped.
+    expect(s).toEqual({ name: 'command', detail: 'git' });
     expect(JSON.stringify(s)).not.toContain('SECRET');
+    expect(JSON.stringify(s)).not.toContain('force');
   });
-  it('file_change emits only paths, never diff', () => {
+  it('file_change emits only basenames, never diff', () => {
     const s = summarizeItem({
       id: '1',
       type: 'file_change',
-      changes: [{ path: 'a.ts', kind: 'update' }],
+      changes: [{ path: 'src/secret/keys.ts', kind: 'update' }],
       status: 'completed',
     });
-    expect(s).toEqual({ name: 'file_change', detail: 'a.ts' });
+    expect(s).toEqual({ name: 'file_change', detail: 'keys.ts' });
   });
   it('caps long detail at MAX_TOOL_PARAM_CHARS', () => {
     const s = summarizeItem({
       id: '1',
-      type: 'command_execution',
-      command: 'x'.repeat(MAX_TOOL_PARAM_CHARS + 50),
-      aggregated_output: '',
-      status: 'completed',
+      type: 'web_search',
+      query: 'x'.repeat(MAX_TOOL_PARAM_CHARS + 50),
     });
     expect(s!.detail.length).toBeLessThanOrEqual(MAX_TOOL_PARAM_CHARS + 1); // +1 for ellipsis
   });
@@ -240,6 +240,117 @@ describe('queryAgent event mapping', () => {
       yield { type: 'turn.failed', error: { message: 'boom' } };
     }];
     await expect(collect(queryAgent('hi', cfg()))).rejects.toThrow('boom');
+  });
+
+  it('throws on a stream-level error event', async () => {
+    scriptedRuns = [async function* () {
+      yield started('tid');
+      yield { type: 'error', message: 'stream broke' };
+    }];
+    await expect(collect(queryAgent('hi', cfg()))).rejects.toThrow('stream broke');
+  });
+
+  it('throws on an ErrorItem (item.type=error) instead of producing no output', async () => {
+    scriptedRuns = [async function* () {
+      yield started('tid');
+      yield { type: 'item.completed', item: { id: 'e1', type: 'error', message: 'tool blew up' } };
+    }];
+    await expect(collect(queryAgent('hi', cfg()))).rejects.toThrow('tool blew up');
+  });
+
+  it('handles item.updated as a snapshot overwrite for agent_message', async () => {
+    scriptedRuns = [async function* () {
+      yield started('tid');
+      yield { type: 'item.updated', item: { id: 'm1', type: 'agent_message', text: 'partial' } };
+      yield { type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: 'final full text' } };
+      yield turnDone;
+    }];
+    // Same id → one message, last snapshot wins (no duplication).
+    const out = await collect(queryAgent('hi', cfg()));
+    expect(out).toEqual(['final full text']);
+  });
+
+  it('yields multiple distinct agent_messages in first-seen order', async () => {
+    scriptedRuns = [async function* () {
+      yield started('tid');
+      yield msg('m1', 'first');
+      yield msg('m2', 'second');
+      yield turnDone;
+    }];
+    const out = await collect(queryAgent('hi', cfg()));
+    expect(out).toEqual(['first', 'second']);
+  });
+
+  it('web_search is NOT a side effect — fresh-retry stays open after it', async () => {
+    const cleared: boolean[] = [];
+    scriptedRuns = [
+      async function* () {
+        yield started('tid');
+        yield { type: 'item.completed', item: { id: 'w1', type: 'web_search', query: 'q' } };
+        throw new Error('thread not found'); // stale resume AFTER a search
+      },
+      async function* () {
+        yield started('new');
+        yield msg('m', 'after-search recovery');
+        yield turnDone;
+      },
+    ];
+    const out = await collect(
+      queryAgent('hi', cfg(), undefined, undefined, {
+        resume: 'dead',
+        onResumeFailed: () => cleared.push(true),
+        fallbackRetryPrompt: 'h',
+      }),
+    );
+    expect(out.join('')).toBe('after-search recovery');
+    expect(cleared).toEqual([true]);
+    expect(calls.length).toBe(2); // resumed, then fresh retry
+  });
+});
+
+describe('isResumeError discrimination (via recovery behavior)', () => {
+  // A non-stale error whose text merely contains "resume" must NOT trigger a
+  // fresh retry (would drop a valid thread + re-hit upstream). We assert the
+  // error propagates and no second run happens.
+  it('does not treat a generic error containing the word "resume" as stale', async () => {
+    const cleared: boolean[] = [];
+    scriptedRuns = [async function* () {
+      yield started('tid');
+      throw new Error('rate limited while running codex exec resume');
+    }];
+    await expect(
+      collect(
+        queryAgent('hi', cfg(), undefined, undefined, {
+          resume: 'valid-tid',
+          onResumeFailed: () => cleared.push(true),
+          fallbackRetryPrompt: 'h',
+        }),
+      ),
+    ).rejects.toThrow('rate limited');
+    expect(cleared).toEqual([]); // id NOT cleared
+    expect(calls.length).toBe(1); // NO fresh retry
+  });
+
+  it('treats "thread not found" as stale and recovers', async () => {
+    scriptedRuns = [
+      async function* () {
+        yield started('tid');
+        throw new Error('thread not found: abc');
+      },
+      async function* () {
+        yield started('new');
+        yield msg('m', 'ok');
+        yield turnDone;
+      },
+    ];
+    const out = await collect(
+      queryAgent('hi', cfg(), undefined, undefined, {
+        resume: 'dead',
+        fallbackRetryPrompt: 'h',
+      }),
+    );
+    expect(out.join('')).toBe('ok');
+    expect(calls.length).toBe(2);
   });
 });
 

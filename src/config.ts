@@ -429,6 +429,7 @@ function assertGroupConfigDirOutsideCwd(cfg: Config): void {
 }
 
 /** Resolve to a real path when it exists (defeats symlink dodges), else lexical. */
+
 function canonicalize(p: string): string {
   try {
     return realpathSync.native(p);
@@ -566,19 +567,64 @@ export function resolveBotConfigs(config: Config): Config[] {
         ...(model !== undefined ? { model } : {}),
         ...(botSystemPrompt !== undefined ? { systemPrompt: botSystemPrompt } : {}),
         // CODEX_HOME defaults to the bot's own subtree; an explicit per-bot
-        // sdk.codexHome (e.g. ~/.codex for opt-in sharing) wins.
-        codexHome: perBotFile.sdk?.codexHome ?? config.sdk.codexHome ?? botCodexHome,
+        // sdk.codexHome (e.g. ~/.codex for opt-in sharing) wins. Expand a leading
+        // ~ — env values are NOT shell-expanded, so a literal "~/.codex" would
+        // create a bogus dir named "~" instead of sharing the personal home.
+        codexHome: expandHome(perBotFile.sdk?.codexHome ?? config.sdk.codexHome) ?? botCodexHome,
       },
     };
     if (!isAllowedApiUrl(resolved.apiUrl)) {
       throw new Error(`Bot "${id}": unsafe apiUrl ${resolved.apiUrl} (SSRF protection)`);
     }
+    // per-bot sdk can override codexBaseUrl/sandboxMode — re-validate here so a
+    // bad per-bot value fails at boot, not silently (loadConfig only saw the
+    // global layer).
+    if (resolved.sdk.codexBaseUrl && !isAllowedApiUrl(resolved.sdk.codexBaseUrl)) {
+      throw new Error(`Bot "${id}": unsafe sdk.codexBaseUrl ${resolved.sdk.codexBaseUrl} (SSRF protection)`);
+    }
+    if (resolved.sdk.sandboxMode === 'danger-full-access') {
+      throw new Error(`Bot "${id}": sdk.sandboxMode 'danger-full-access' is not allowed (untrusted IM input)`);
+    }
+    // Fail-fast on misspelled enums so a typo surfaces at boot, not on every
+    // message (where buildThreadOptions would throw inside the handler and the
+    // bot would look online but fail every turn).
+    assertSdkEnums(id, resolved.sdk);
     // GROUP.md trust boundary: groupConfigDir must not be the bot's writable cwd.
     assertGroupConfigDirOutsideCwd(resolved);
     return resolved;
   });
 
   return resolvedBots;
+}
+
+/**
+ * Expand a leading `~` or `~/` to the user's home directory. Env var values are
+ * not shell-expanded, so a config like `codexHome: "~/.codex"` must be resolved
+ * here or it would create a literal directory named "~". Returns undefined for
+ * undefined input (caller falls back to the derived default).
+ */
+export function expandHome(p: string | undefined): string | undefined {
+  if (p === undefined) return undefined;
+  if (p === '~') return homedir();
+  if (p.startsWith('~/')) return pathJoin(homedir(), p.slice(2));
+  return p;
+}
+
+/**
+ * Validate the codex sdk enum fields at boot so a misspelled value fails fast
+ * (instead of throwing inside the per-message handler). Mirrors the allowed
+ * sets in agent-bridge; kept here (no import) to avoid a config↔bridge cycle.
+ */
+function assertSdkEnums(id: string, sdk: Config['sdk']): void {
+  const check = (field: string, value: string | undefined, allowed: string[]): void => {
+    if (value !== undefined && !allowed.includes(value)) {
+      throw new Error(`Bot "${id}": invalid sdk.${field} '${value}' (allowed: ${allowed.join(', ')})`);
+    }
+  };
+  check('sandboxMode', sdk.sandboxMode, ['read-only', 'workspace-write', 'danger-full-access']);
+  check('approvalPolicy', sdk.approvalPolicy, ['never', 'on-request', 'on-failure', 'untrusted']);
+  check('modelReasoningEffort', sdk.modelReasoningEffort, ['minimal', 'low', 'medium', 'high', 'xhigh']);
+  check('webSearchMode', sdk.webSearchMode, ['disabled', 'cached', 'live']);
 }
 
 /**
