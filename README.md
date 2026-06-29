@@ -1,6 +1,19 @@
-# codex-channel-octo
+<h1 align="center">codex-channel-octo</h1>
 
-把 **OpenAI Codex**(经 [`@openai/codex-sdk`](https://www.npmjs.com/package/@openai/codex-sdk))接成 **Octo IM** 机器人的独立 Node.js 网关。与 [`cc-channel-octo`](https://github.com/Mininglamp-OSS/cc-channel-octo)(Claude Code 版)同形态,内核换成 Codex。
+<p align="center">
+  把 <a href="https://developers.openai.com/codex">OpenAI Codex</a>(经 <a href="https://www.npmjs.com/package/@openai/codex-sdk"><code>@openai/codex-sdk</code></a>)接成 <a href="https://github.com/nicco-io/octo">Octo</a> IM 机器人的独立 Node.js 网关。
+</p>
+
+<p align="center">
+  <a href="https://github.com/Mininglamp-OSS/codex-channel-octo/actions"><img src="https://github.com/Mininglamp-OSS/codex-channel-octo/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="Node.js version">
+  <img src="https://img.shields.io/badge/status-early%20test-orange" alt="Status: early test">
+</p>
+
+---
+
+> ⚠️ **早期测试版(v0.1.0)。** 主链路(注册 / 连接 / 多轮对话 / 多 bot)已验证可用,但仍在完善中。**已知缺口**:暂无定时任务(cron)、暂无 skills——见 [CHANGELOG](./CHANGELOG.md)。与姊妹仓库 [`cc-channel-octo`](https://github.com/Mininglamp-OSS/cc-channel-octo)(Claude Code 版)同形态,内核换成 Codex。
 
 ## 是什么
 
