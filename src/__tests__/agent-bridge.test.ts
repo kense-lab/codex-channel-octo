@@ -147,6 +147,23 @@ describe('buildThreadOptions', () => {
   it('rejects invalid approvalPolicy', () => {
     expect(() => buildThreadOptions(cfg({ approvalPolicy: 'bogus' }), '/tmp/x')).toThrow();
   });
+  it('attaches additionalDirectories under workspace-write', () => {
+    const o = buildThreadOptions(
+      cfg({ sandboxMode: 'workspace-write', allowWorkspaceWrite: true, additionalDirectories: ['/Users/caster/work-bus'] }),
+      '/tmp/x',
+    );
+    expect(o.sandboxMode).toBe('workspace-write');
+    expect(o.additionalDirectories).toEqual(['/Users/caster/work-bus']);
+  });
+  it('omits additionalDirectories under read-only (inert without write access)', () => {
+    // sandbox stays read-only (gate off) → extra writable roots would be meaningless
+    const o = buildThreadOptions(
+      cfg({ sandboxMode: 'workspace-write', additionalDirectories: ['/Users/caster/work-bus'] }),
+      '/tmp/x',
+    );
+    expect(o.sandboxMode).toBe('read-only');
+    expect(o.additionalDirectories).toBeUndefined();
+  });
 });
 
 describe('summarizeItem redaction', () => {

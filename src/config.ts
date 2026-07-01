@@ -15,7 +15,7 @@
  */
 
 import { readFileSync, existsSync, statSync, realpathSync } from 'node:fs';
-import { resolve as resolvePath, sep, dirname, join as pathJoin } from 'node:path';
+import { resolve as resolvePath, sep, dirname, join as pathJoin, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { isAllowedApiUrl } from './url-policy.js';
 
@@ -141,6 +141,17 @@ export interface Config {
      * to give a bot's provider routing or its tools the env they need. Per-bot.
      */
     env?: Record<string, string>;
+    /**
+     * Extra directories added to the Codex sandbox's writable roots (SDK
+     * ThreadOptions.additionalDirectories). Only meaningful under
+     * sandboxMode:'workspace-write' + allowWorkspaceWrite:true; ignored under
+     * read-only. Each entry MUST be an absolute path — relative or '~' entries
+     * expand differently per runtime and would silently point at the wrong place
+     * or escape the intended boundary. Validated in loadConfig. Default: none.
+     * Use to grant the bot write access to a shared dir outside its cwd (e.g. a
+     * cross-agent work bus).
+     */
+    additionalDirectories?: string[];
   };
   rateLimit: {
     maxPerMinute: number;
@@ -400,6 +411,16 @@ export function loadConfig(configPath?: string): Config {
       `Unsafe sdk.sandboxMode: 'danger-full-access' is not allowed (untrusted IM input). ` +
       `Use 'read-only' (default) or 'workspace-write' with allowWorkspaceWrite:true.`,
     );
+  }
+  // additionalDirectories extend the writable sandbox — each must be an explicit
+  // absolute path. Relative / '~' entries expand per-runtime and could resolve
+  // outside the intended boundary; reject rather than guess.
+  for (const dir of final.sdk.additionalDirectories ?? []) {
+    if (typeof dir !== 'string' || !isAbsolute(dir) || dir.startsWith('~')) {
+      throw new Error(
+        `Unsafe sdk.additionalDirectories entry: ${JSON.stringify(dir)} — must be an absolute path (no '~' or relative).`,
+      );
+    }
   }
 
   return final;

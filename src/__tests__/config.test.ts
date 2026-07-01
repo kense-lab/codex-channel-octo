@@ -319,6 +319,40 @@ describe('sandboxMode', () => {
   });
 });
 
+// ─── additionalDirectories validation ───────────────────────────────────
+
+describe('sdk.additionalDirectories', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('accepts absolute paths', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { additionalDirectories: ['/Users/caster/work-bus'] },
+    });
+    expect(loadConfig(path).sdk.additionalDirectories).toEqual(['/Users/caster/work-bus']);
+  });
+
+  it('rejects a relative path', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { additionalDirectories: ['work-bus'] },
+    });
+    expect(() => loadConfig(path)).toThrow(/Unsafe sdk\.additionalDirectories/);
+  });
+
+  it("rejects a '~'-prefixed path (per-runtime expansion)", () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { additionalDirectories: ['~/work-bus'] },
+    });
+    expect(() => loadConfig(path)).toThrow(/Unsafe sdk\.additionalDirectories/);
+  });
+});
+
 // ─── Derived per-bot directories (bot-first layout) ─────────────────────
 
 describe('derived per-bot directories', () => {

@@ -187,6 +187,12 @@ export function buildThreadOptions(config: Config, cwd: string): ThreadOptions {
   const webSearchMode = (webSearchEnabled
     ? validateOrDefault(sdk.webSearchMode, VALID_WEB_SEARCH_MODES, 'live')
     : 'disabled') as NonNullable<ThreadOptions['webSearchMode']>;
+  // Extra writable roots only make sense once writing is actually on: under a
+  // read-only sandbox they would be inert, so only attach under workspace-write.
+  // loadConfig already enforced absolute paths.
+  const additionalDirectories = (sandboxMode === 'workspace-write' && sdk.additionalDirectories?.length)
+    ? sdk.additionalDirectories
+    : undefined;
   return {
     workingDirectory: cwd,
     skipGitRepoCheck: true,
@@ -197,6 +203,7 @@ export function buildThreadOptions(config: Config, cwd: string): ThreadOptions {
     webSearchEnabled,
     webSearchMode,
     ...(sdk.model ? { model: sdk.model } : {}),
+    ...(additionalDirectories ? { additionalDirectories } : {}),
   };
 }
 
