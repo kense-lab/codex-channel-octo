@@ -328,6 +328,11 @@ export async function* queryAgent(
   if (!agentsMdOk && threadOpts.sandboxMode === 'workspace-write') {
     console.warn('[codex-channel-octo] AGENTS.md refresh failed; forcing read-only sandbox this turn');
     threadOpts.sandboxMode = 'read-only';
+    // Drop the extra writable roots too: they are only ever attached under
+    // workspace-write, so once we downgrade they must not linger. Keeps the
+    // "read-only never carries additionalDirectories" invariant true on every
+    // path, not just the primary buildThreadOptions branch.
+    delete threadOpts.additionalDirectories;
   }
 
   // Restate the security framing atop the prompt (defense in depth — AGENTS.md
