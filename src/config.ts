@@ -604,12 +604,16 @@ export function resolveBotConfigs(config: Config): Config[] {
     }
     // per-bot sdk can also override additionalDirectories — re-validate so a
     // per-bot relative / '~' entry can't slip past the global-only check, and
-    // reject any entry that overlaps this bot's trust anchors (its writable cwd
-    // where AGENTS.md is written, the config/SOUL tree, or the group-config dir).
+    // reject any entry that overlaps this bot's trust anchors: its writable cwd
+    // (AGENTS.md), the config/SOUL tree, the group-config dir, its memory dir
+    // (re-injected into future turns), and codexHome (auth.json / config.toml —
+    // credentials; may be relocated outside baseDir, e.g. a shared ~/.codex).
     assertAdditionalDirectories(id, resolved.sdk.additionalDirectories, [
       { label: "the bot's writable cwd", path: resolved.cwdBase ?? resolved.cwd },
       { label: 'the config/SOUL/data tree (baseDir)', path: resolved.baseDir },
       { label: 'groupConfigDir (trusted group instructions)', path: resolved.groupConfigDir },
+      { label: 'the bot memory directory', path: resolved.memoryBase },
+      { label: 'codexHome (agent credentials / config.toml)', path: resolved.sdk.codexHome },
     ]);
     // Fail-fast on misspelled enums so a typo surfaces at boot, not on every
     // message (where buildThreadOptions would throw inside the handler and the
@@ -658,6 +662,14 @@ function assertAdditionalDirectories(
   dirs: string[] | undefined,
   trustAnchors: Array<{ label: string; path: string | undefined }> = [],
 ): void {
+  // additionalDirectories comes from untyped JSON. A bare string would iterate
+  // char-by-char (misleading "unsafe entry 'f'") and a non-iterable would throw
+  // a raw TypeError below — fail closed with an actionable message instead.
+  if (dirs !== undefined && !Array.isArray(dirs)) {
+    throw new Error(
+      `Bot "${id}": sdk.additionalDirectories must be an array of absolute paths (got ${typeof dirs}).`,
+    );
+  }
   for (const dir of dirs ?? []) {
     if (typeof dir !== 'string' || !isAbsolute(dir) || dir.startsWith('~')) {
       throw new Error(

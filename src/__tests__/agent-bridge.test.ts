@@ -164,6 +164,14 @@ describe('buildThreadOptions', () => {
     expect(o.sandboxMode).toBe('read-only');
     expect(o.additionalDirectories).toBeUndefined();
   });
+  it('omits additionalDirectories for an empty array under workspace-write', () => {
+    const o = buildThreadOptions(
+      cfg({ sandboxMode: 'workspace-write', allowWorkspaceWrite: true, additionalDirectories: [] }),
+      '/tmp/x',
+    );
+    expect(o.sandboxMode).toBe('workspace-write');
+    expect(o.additionalDirectories).toBeUndefined();
+  });
 });
 
 describe('summarizeItem redaction', () => {
@@ -344,6 +352,24 @@ describe('queryAgent event mapping', () => {
     // AGENTS.md must never run with write access, including via lingering roots.
     expect(calls[0].opts?.sandboxMode).toBe('read-only');
     expect(calls[0].opts?.additionalDirectories).toBeUndefined();
+  });
+
+  it('forwards additionalDirectories on the resume path too (shared threadOpts)', async () => {
+    scriptedRuns = [async function* () {
+      yield started('tid');
+      yield msg('m', 'resumed ok');
+      yield turnDone;
+    }];
+    const c = cfg({
+      sandboxMode: 'workspace-write',
+      allowWorkspaceWrite: true,
+      additionalDirectories: ['/Users/caster/work-bus'],
+    });
+    await collect(queryAgent('hi', c, undefined, undefined, { resume: 'tid-r' }));
+    // resumeThread(resumeId, threadOpts) shares the same threadOpts as startThread,
+    // so the extra writable roots are forwarded on resumed turns as well.
+    expect(calls[0]).toMatchObject({ kind: 'resume', resumeId: 'tid-r' });
+    expect(calls[0].opts?.additionalDirectories).toEqual(['/Users/caster/work-bus']);
   });
 });
 

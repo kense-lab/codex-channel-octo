@@ -425,6 +425,28 @@ describe('sdk.additionalDirectories', () => {
     });
     expect(() => loadConfig(path)).toThrow(/must not contain/);
   });
+
+  it('rejects a per-bot entry overlapping codexHome (credentials), even when relocated outside baseDir', () => {
+    const path = writeConfig({ apiUrl: 'https://a' });
+    // Operator relocates codexHome to a shared dir outside baseDir, then also
+    // grants that dir (or its parent) as a writable root — the agent could then
+    // rewrite its own auth.json / config.toml. Must be rejected.
+    const shared = '/Users/caster/work-bus/shared-codex-home';
+    writeBotConfig('default', {
+      botToken: 'bf_p',
+      sdk: { codexHome: shared, additionalDirectories: [shared] },
+    });
+    expect(() => resolveBotConfigs(loadConfig(path))).toThrow(/overlaps/);
+  });
+
+  it('rejects a non-array additionalDirectories with an actionable error', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { additionalDirectories: '/Users/caster/work-bus' as unknown as string[] },
+    });
+    expect(() => loadConfig(path)).toThrow(/must be an array/);
+  });
 });
 
 // ─── Derived per-bot directories (bot-first layout) ─────────────────────

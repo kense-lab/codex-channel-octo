@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`sdk.additionalDirectories`** — optional list of extra **writable** sandbox
+  roots outside the per-session cwd (e.g. a shared work bus), forwarded to the
+  Codex SDK. Only attached under `workspace-write`; omitted under `read-only`
+  and dropped when a turn is force-downgraded on AGENTS.md write failure.
+  Entries must be absolute paths (no `~`/relative/`..`) and are rejected at boot
+  if they contain, equal, or sit inside a trusted/sensitive directory — the
+  session cwd, the config/SOUL tree, `groupConfigDir`, the memory dir, or
+  `codexHome` — so a writable root can never overlap the agent's trust anchors.
+
 ## [0.1.0] - 2026-06-29
 
 First, early test release. Bridges OpenAI Codex (via `@openai/codex-sdk`) to
