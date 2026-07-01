@@ -412,16 +412,9 @@ export function loadConfig(configPath?: string): Config {
       `Use 'read-only' (default) or 'workspace-write' with allowWorkspaceWrite:true.`,
     );
   }
-  // additionalDirectories extend the writable sandbox — each must be an explicit
-  // absolute path. Relative / '~' entries expand per-runtime and could resolve
-  // outside the intended boundary; reject rather than guess.
-  for (const dir of final.sdk.additionalDirectories ?? []) {
-    if (typeof dir !== 'string' || !isAbsolute(dir) || dir.startsWith('~')) {
-      throw new Error(
-        `Unsafe sdk.additionalDirectories entry: ${JSON.stringify(dir)} — must be an absolute path (no '~' or relative).`,
-      );
-    }
-  }
+  // additionalDirectories extend the writable sandbox — validate the global
+  // layer here. Per-bot overrides are re-validated in resolveBotConfigs().
+  assertAdditionalDirectories('config', final.sdk.additionalDirectories);
 
   return final;
 }
@@ -606,6 +599,9 @@ export function resolveBotConfigs(config: Config): Config[] {
     if (resolved.sdk.sandboxMode === 'danger-full-access') {
       throw new Error(`Bot "${id}": sdk.sandboxMode 'danger-full-access' is not allowed (untrusted IM input)`);
     }
+    // per-bot sdk can also override additionalDirectories — re-validate so a
+    // per-bot relative / '~' entry can't slip past the global-only check.
+    assertAdditionalDirectories(id, resolved.sdk.additionalDirectories);
     // Fail-fast on misspelled enums so a typo surfaces at boot, not on every
     // message (where buildThreadOptions would throw inside the handler and the
     // bot would look online but fail every turn).
@@ -629,6 +625,23 @@ export function expandHome(p: string | undefined): string | undefined {
   if (p === '~') return homedir();
   if (p.startsWith('~/')) return pathJoin(homedir(), p.slice(2));
   return p;
+}
+
+/**
+ * Validate `sdk.additionalDirectories`: every entry must be an explicit
+ * absolute path. Relative / '~' entries expand per-runtime and could resolve
+ * outside the intended sandbox boundary, so reject them rather than guess.
+ * Called on both the global merged config (loadConfig) and each per-bot config
+ * (resolveBotConfigs) — a per-bot override must not slip past the global check.
+ */
+function assertAdditionalDirectories(id: string, dirs: string[] | undefined): void {
+  for (const dir of dirs ?? []) {
+    if (typeof dir !== 'string' || !isAbsolute(dir) || dir.startsWith('~')) {
+      throw new Error(
+        `Bot "${id}": unsafe sdk.additionalDirectories entry ${JSON.stringify(dir)} — must be an absolute path (no '~' or relative).`,
+      );
+    }
+  }
 }
 
 /**

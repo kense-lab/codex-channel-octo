@@ -325,7 +325,7 @@ describe('sdk.additionalDirectories', () => {
   beforeEach(setup);
   afterEach(teardown);
 
-  it('accepts absolute paths', () => {
+  it('accepts absolute paths (global)', () => {
     const path = writeConfig({
       botToken: 'bf_t',
       apiUrl: 'https://a',
@@ -334,22 +334,41 @@ describe('sdk.additionalDirectories', () => {
     expect(loadConfig(path).sdk.additionalDirectories).toEqual(['/Users/caster/work-bus']);
   });
 
-  it('rejects a relative path', () => {
+  it('rejects a relative path (global)', () => {
     const path = writeConfig({
       botToken: 'bf_t',
       apiUrl: 'https://a',
       sdk: { additionalDirectories: ['work-bus'] },
     });
-    expect(() => loadConfig(path)).toThrow(/Unsafe sdk\.additionalDirectories/);
+    expect(() => loadConfig(path)).toThrow(/additionalDirectories/);
   });
 
-  it("rejects a '~'-prefixed path (per-runtime expansion)", () => {
+  it("rejects a '~'-prefixed path (global, per-runtime expansion)", () => {
     const path = writeConfig({
       botToken: 'bf_t',
       apiUrl: 'https://a',
       sdk: { additionalDirectories: ['~/work-bus'] },
     });
-    expect(() => loadConfig(path)).toThrow(/Unsafe sdk\.additionalDirectories/);
+    expect(() => loadConfig(path)).toThrow(/additionalDirectories/);
+  });
+
+  it('rejects a per-bot relative override (not just the global layer)', () => {
+    const path = writeConfig({ apiUrl: 'https://a' });
+    writeBotConfig('default', { botToken: 'bf_p', sdk: { additionalDirectories: ['work-bus'] } });
+    expect(() => resolveBotConfigs(loadConfig(path))).toThrow(/additionalDirectories/);
+  });
+
+  it("rejects a per-bot '~' override", () => {
+    const path = writeConfig({ apiUrl: 'https://a' });
+    writeBotConfig('default', { botToken: 'bf_p', sdk: { additionalDirectories: ['~/work-bus'] } });
+    expect(() => resolveBotConfigs(loadConfig(path))).toThrow(/additionalDirectories/);
+  });
+
+  it('accepts a per-bot absolute override', () => {
+    const path = writeConfig({ apiUrl: 'https://a' });
+    writeBotConfig('default', { botToken: 'bf_p', sdk: { additionalDirectories: ['/Users/caster/work-bus'] } });
+    const [bot] = resolveBotConfigs(loadConfig(path));
+    expect(bot.sdk.additionalDirectories).toEqual(['/Users/caster/work-bus']);
   });
 });
 
