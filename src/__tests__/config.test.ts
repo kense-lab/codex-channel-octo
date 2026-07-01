@@ -370,6 +370,61 @@ describe('sdk.additionalDirectories', () => {
     const [bot] = resolveBotConfigs(loadConfig(path));
     expect(bot.sdk.additionalDirectories).toEqual(['/Users/caster/work-bus']);
   });
+
+  // Trust-anchor overlap: the sandboxed agent runs on untrusted IM input, so a
+  // writable root that overlaps the config/SOUL tree, the session cwd (AGENTS.md),
+  // or the group-instructions dir would let the agent overwrite its own trust
+  // anchors. Reject overlap in either direction.
+  it('rejects a global entry equal to baseDir (config/SOUL tree)', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { additionalDirectories: [tmpDir] },
+    });
+    expect(() => loadConfig(path)).toThrow(/overlaps/);
+  });
+
+  it('rejects a global entry that is an ancestor of baseDir', () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { additionalDirectories: [tmpdir()] }, // tmpDir lives directly under tmpdir()
+    });
+    expect(() => loadConfig(path)).toThrow(/overlaps/);
+  });
+
+  it("rejects a per-bot entry overlapping the bot's writable cwd / subtree", () => {
+    const path = writeConfig({ apiUrl: 'https://a' });
+    // <baseDir>/default is the bot's own subtree (contains workspace/, where
+    // AGENTS.md is written) — granting it as a writable root is a trust escape.
+    writeBotConfig('default', {
+      botToken: 'bf_p',
+      sdk: { additionalDirectories: [join(tmpDir, 'default')] },
+    });
+    expect(() => resolveBotConfigs(loadConfig(path))).toThrow(/overlaps/);
+  });
+
+  it('rejects an entry overlapping groupConfigDir (trusted group instructions)', () => {
+    // groupConfigDir must be outside cwdBase (separate guard), so use an external
+    // absolute path and grant that same path as a writable root.
+    const ext = '/Users/caster/work-bus/trusted-groups';
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      groupConfigDir: ext,
+      sdk: { additionalDirectories: [ext] },
+    });
+    expect(() => loadConfig(path)).toThrow(/overlaps/);
+  });
+
+  it("rejects a '..'-bearing absolute path (resolves elsewhere per-runtime)", () => {
+    const path = writeConfig({
+      botToken: 'bf_t',
+      apiUrl: 'https://a',
+      sdk: { additionalDirectories: ['/Users/caster/work-bus/../../etc'] },
+    });
+    expect(() => loadConfig(path)).toThrow(/must not contain/);
+  });
 });
 
 // ─── Derived per-bot directories (bot-first layout) ─────────────────────
