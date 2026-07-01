@@ -15,7 +15,7 @@
  */
 
 import { readFileSync, existsSync, statSync, realpathSync } from 'node:fs';
-import { resolve as resolvePath, sep, dirname, join as pathJoin } from 'node:path';
+import { resolve as resolvePath, sep, dirname, join as pathJoin, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { isAllowedApiUrl } from './url-policy.js';
 
@@ -141,6 +141,17 @@ export interface Config {
      * to give a bot's provider routing or its tools the env they need. Per-bot.
      */
     env?: Record<string, string>;
+    /**
+     * Extra directories added to the Codex sandbox's writable roots (SDK
+     * ThreadOptions.additionalDirectories). Only meaningful under
+     * sandboxMode:'workspace-write' + allowWorkspaceWrite:true; ignored under
+     * read-only. Each entry MUST be an absolute path — relative or '~' entries
+     * expand differently per runtime and would silently point at the wrong place
+     * or escape the intended boundary. Validated in loadConfig. Default: none.
+     * Use to grant the bot write access to a shared dir outside its cwd (e.g. a
+     * cross-agent work bus).
+     */
+    additionalDirectories?: string[];
   };
   rateLimit: {
     maxPerMinute: number;
@@ -401,6 +412,12 @@ export function loadConfig(configPath?: string): Config {
       `Use 'read-only' (default) or 'workspace-write' with allowWorkspaceWrite:true.`,
     );
   }
+  // additionalDirectories extend the writable sandbox — validate the global
+  // layer here. Per-bot overrides are re-validated in resolveBotConfigs().
+  assertAdditionalDirectories('config', final.sdk.additionalDirectories, [
+    { label: 'the config/SOUL/data tree (baseDir)', path: final.baseDir },
+    { label: 'groupConfigDir (trusted group instructions)', path: final.groupConfigDir },
+  ]);
 
   return final;
 }
@@ -585,6 +602,19 @@ export function resolveBotConfigs(config: Config): Config[] {
     if (resolved.sdk.sandboxMode === 'danger-full-access') {
       throw new Error(`Bot "${id}": sdk.sandboxMode 'danger-full-access' is not allowed (untrusted IM input)`);
     }
+    // per-bot sdk can also override additionalDirectories — re-validate so a
+    // per-bot relative / '~' entry can't slip past the global-only check, and
+    // reject any entry that overlaps this bot's trust anchors: its writable cwd
+    // (AGENTS.md), the config/SOUL tree, the group-config dir, its memory dir
+    // (re-injected into future turns), and codexHome (auth.json / config.toml —
+    // credentials; may be relocated outside baseDir, e.g. a shared ~/.codex).
+    assertAdditionalDirectories(id, resolved.sdk.additionalDirectories, [
+      { label: "the bot's writable cwd", path: resolved.cwdBase ?? resolved.cwd },
+      { label: 'the config/SOUL/data tree (baseDir)', path: resolved.baseDir },
+      { label: 'groupConfigDir (trusted group instructions)', path: resolved.groupConfigDir },
+      { label: 'the bot memory directory', path: resolved.memoryBase },
+      { label: 'codexHome (agent credentials / config.toml)', path: resolved.sdk.codexHome },
+    ]);
     // Fail-fast on misspelled enums so a typo surfaces at boot, not on every
     // message (where buildThreadOptions would throw inside the handler and the
     // bot would look online but fail every turn).
@@ -608,6 +638,67 @@ export function expandHome(p: string | undefined): string | undefined {
   if (p === '~') return homedir();
   if (p.startsWith('~/')) return pathJoin(homedir(), p.slice(2));
   return p;
+}
+
+/**
+ * Validate `sdk.additionalDirectories`: every entry must be an explicit
+ * absolute path. Relative / '~' entries expand per-runtime and could resolve
+ * outside the intended sandbox boundary, so reject them rather than guess.
+ * Called on both the global merged config (loadConfig) and each per-bot config
+ * (resolveBotConfigs) — a per-bot override must not slip past the global check.
+ *
+ * `trustAnchors` are directories that establish the agent's trusted inputs: the
+ * session cwd (where AGENTS.md — the frozen security prefix + SOUL/GROUP text —
+ * is written), the operator config/SOUL/data tree, and the group-instructions
+ * dir (injected UNSANITIZED as trusted). The sandboxed agent is driven by
+ * untrusted IM input, so a writable root that overlaps any anchor would let the
+ * agent overwrite the very files that govern its own trust boundary — a
+ * trust-escape, the same class of risk the code already hard-rejects for
+ * `danger-full-access`. Reject overlap in EITHER direction (entry contains an
+ * anchor, or sits inside one).
+ */
+function assertAdditionalDirectories(
+  id: string,
+  dirs: string[] | undefined,
+  trustAnchors: Array<{ label: string; path: string | undefined }> = [],
+): void {
+  // additionalDirectories comes from untyped JSON. A bare string would iterate
+  // char-by-char (misleading "unsafe entry 'f'") and a non-iterable would throw
+  // a raw TypeError below — fail closed with an actionable message instead.
+  if (dirs !== undefined && !Array.isArray(dirs)) {
+    throw new Error(
+      `Bot "${id}": sdk.additionalDirectories must be an array of absolute paths (got ${typeof dirs}).`,
+    );
+  }
+  for (const dir of dirs ?? []) {
+    if (typeof dir !== 'string' || !isAbsolute(dir) || dir.startsWith('~')) {
+      throw new Error(
+        `Bot "${id}": unsafe sdk.additionalDirectories entry ${JSON.stringify(dir)} — must be an absolute path (no '~' or relative).`,
+      );
+    }
+    // A '..' segment resolves per-runtime to a directory the literal path does
+    // not name (e.g. "/srv/bus/../../etc"), sidestepping the overlap checks
+    // below. Reject rather than silently normalize, so the granted root is
+    // exactly what the operator wrote.
+    if (dir.split(sep).includes('..')) {
+      throw new Error(
+        `Bot "${id}": unsafe sdk.additionalDirectories entry ${JSON.stringify(dir)} — must not contain '..' path segments.`,
+      );
+    }
+    const entry = canonicalize(dir);
+    for (const anchor of trustAnchors) {
+      if (!anchor.path) continue;
+      const a = canonicalize(anchor.path);
+      if (entry === a || isPathInside(entry, a) || isPathInside(a, entry)) {
+        throw new Error(
+          `Bot "${id}": unsafe sdk.additionalDirectories entry ${JSON.stringify(dir)} — ` +
+          `overlaps ${anchor.label} (${anchor.path}). An agent-writable root must not contain, ` +
+          `equal, or sit inside a trusted instruction/config location, or untrusted IM input could ` +
+          `drive the agent to overwrite its own trust anchors.`,
+        );
+      }
+    }
+  }
 }
 
 /**

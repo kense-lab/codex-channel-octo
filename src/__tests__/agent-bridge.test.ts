@@ -13,7 +13,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 type Ev = Record<string, unknown>;
 let scriptedRuns: Array<() => AsyncGenerator<Ev>>;
 let runIdx: number;
-const calls: Array<{ kind: 'start' | 'resume'; resumeId?: string }> = [];
+const calls: Array<{ kind: 'start' | 'resume'; resumeId?: string; opts?: Record<string, unknown> }> = [];
 
 function makeThread() {
   return {
@@ -28,12 +28,12 @@ function makeThread() {
 
 vi.mock('@openai/codex-sdk', () => ({
   Codex: class {
-    startThread() {
-      calls.push({ kind: 'start' });
+    startThread(opts?: Record<string, unknown>) {
+      calls.push({ kind: 'start', opts });
       return makeThread();
     }
-    resumeThread(id: string) {
-      calls.push({ kind: 'resume', resumeId: id });
+    resumeThread(id: string, opts?: Record<string, unknown>) {
+      calls.push({ kind: 'resume', resumeId: id, opts });
       return makeThread();
     }
   },
@@ -147,6 +147,31 @@ describe('buildThreadOptions', () => {
   it('rejects invalid approvalPolicy', () => {
     expect(() => buildThreadOptions(cfg({ approvalPolicy: 'bogus' }), '/tmp/x')).toThrow();
   });
+  it('attaches additionalDirectories under workspace-write', () => {
+    const o = buildThreadOptions(
+      cfg({ sandboxMode: 'workspace-write', allowWorkspaceWrite: true, additionalDirectories: ['/Users/caster/work-bus'] }),
+      '/tmp/x',
+    );
+    expect(o.sandboxMode).toBe('workspace-write');
+    expect(o.additionalDirectories).toEqual(['/Users/caster/work-bus']);
+  });
+  it('omits additionalDirectories under read-only (inert without write access)', () => {
+    // sandbox stays read-only (gate off) → extra writable roots would be meaningless
+    const o = buildThreadOptions(
+      cfg({ sandboxMode: 'workspace-write', additionalDirectories: ['/Users/caster/work-bus'] }),
+      '/tmp/x',
+    );
+    expect(o.sandboxMode).toBe('read-only');
+    expect(o.additionalDirectories).toBeUndefined();
+  });
+  it('omits additionalDirectories for an empty array under workspace-write', () => {
+    const o = buildThreadOptions(
+      cfg({ sandboxMode: 'workspace-write', allowWorkspaceWrite: true, additionalDirectories: [] }),
+      '/tmp/x',
+    );
+    expect(o.sandboxMode).toBe('workspace-write');
+    expect(o.additionalDirectories).toBeUndefined();
+  });
 });
 
 describe('summarizeItem redaction', () => {
@@ -231,7 +256,7 @@ describe('queryAgent event mapping', () => {
       queryAgent('hi', cfg(), undefined, undefined, { resume: 'old-tid' }),
     );
     expect(out.join('')).toBe('resumed reply');
-    expect(calls[0]).toEqual({ kind: 'resume', resumeId: 'old-tid' });
+    expect(calls[0]).toMatchObject({ kind: 'resume', resumeId: 'old-tid' });
   });
 
   it('throws on turn.failed', async () => {
@@ -306,6 +331,46 @@ describe('queryAgent event mapping', () => {
     expect(cleared).toEqual([true]);
     expect(calls.length).toBe(2); // resumed, then fresh retry
   });
+
+  it('force-downgrade on AGENTS.md refresh failure also strips additionalDirectories', async () => {
+    scriptedRuns = [async function* () {
+      yield started('tid');
+      yield msg('m', 'ok');
+      yield turnDone;
+    }];
+    // A cwd under a non-directory forces mkdirSync/writeFileSync to throw, so
+    // writeAgentsMd returns false and this turn is forced to read-only.
+    const c = cfg({
+      sandboxMode: 'workspace-write',
+      allowWorkspaceWrite: true,
+      additionalDirectories: ['/Users/caster/work-bus'],
+    });
+    c.cwd = '/dev/null/ws';
+    c.cwdBase = '/dev/null/ws';
+    await collect(queryAgent('hi', c));
+    // Downgraded to read-only AND the extra writable roots were dropped: a stale
+    // AGENTS.md must never run with write access, including via lingering roots.
+    expect(calls[0].opts?.sandboxMode).toBe('read-only');
+    expect(calls[0].opts?.additionalDirectories).toBeUndefined();
+  });
+
+  it('forwards additionalDirectories on the resume path too (shared threadOpts)', async () => {
+    scriptedRuns = [async function* () {
+      yield started('tid');
+      yield msg('m', 'resumed ok');
+      yield turnDone;
+    }];
+    const c = cfg({
+      sandboxMode: 'workspace-write',
+      allowWorkspaceWrite: true,
+      additionalDirectories: ['/Users/caster/work-bus'],
+    });
+    await collect(queryAgent('hi', c, undefined, undefined, { resume: 'tid-r' }));
+    // resumeThread(resumeId, threadOpts) shares the same threadOpts as startThread,
+    // so the extra writable roots are forwarded on resumed turns as well.
+    expect(calls[0]).toMatchObject({ kind: 'resume', resumeId: 'tid-r' });
+    expect(calls[0].opts?.additionalDirectories).toEqual(['/Users/caster/work-bus']);
+  });
 });
 
 describe('isResumeError discrimination (via recovery behavior)', () => {
@@ -379,8 +444,8 @@ describe('queryAgent stale-resume recovery', () => {
     );
     expect(out.join('')).toBe('recovered');
     expect(cleared).toEqual([true]);
-    expect(calls[0]).toEqual({ kind: 'resume', resumeId: 'dead' });
-    expect(calls[1]).toEqual({ kind: 'start' });
+    expect(calls[0]).toMatchObject({ kind: 'resume', resumeId: 'dead' });
+    expect(calls[1]).toMatchObject({ kind: 'start' });
   });
 
   it('does NOT fresh-retry when a side effect already happened (avoids duplicate work)', async () => {
