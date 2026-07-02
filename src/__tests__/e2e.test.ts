@@ -710,6 +710,21 @@ describe('E2E smoke tests', () => {
     );
   });
 
+  it('sends an informative reply when a stream interrupt survives recovery', async () => {
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(async function* () {
+      throw new Error('stream closed before response.completed');
+    });
+
+    const msg = makeDmMsg('trigger stream interrupt');
+    await simulateMessage(msg, config, store, router, groupContext, streamRelay);
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: '模型服务连接中断（上游返回不完整），已自动重试仍未成功，请稍后重发或换个问法。',
+      }),
+    );
+  });
+
   it('swallows error reply failure silently', async () => {
     (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(async function* () {
       throw new Error('SDK exploded');

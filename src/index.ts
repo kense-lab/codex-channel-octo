@@ -15,7 +15,7 @@ import { SessionStore } from './session-store.js';
 import { OctoGateway } from './gateway.js';
 import { SessionRouter } from './session-router.js';
 import { GroupContext } from './group-context.js';
-import { queryAgent } from './agent-bridge.js';
+import { queryAgent, isStreamInterruptError } from './agent-bridge.js';
 import { sanitizeDisplayName, escapeSectionMarkers, sanitizePromptBody } from './prompt-safety.js';
 import type { SessionCtx } from './cwd-resolver.js';
 import { cleanupExpiredCwds, resolveSessionCwd } from './cwd-resolver.js';
@@ -798,14 +798,19 @@ export async function handleMessage(
 
     } catch (err) {
       console.error(`[codex-channel-octo] Error processing message (session=${result.sessionKey}):`, String(err));
-      // Best-effort error reply
+      // Best-effort error reply. A stream interrupt that even one-shot resume
+      // recovery couldn't save gets an informative message (upstream returned
+      // an incomplete stream); everything else keeps the generic wording.
+      const content = isStreamInterruptError(err)
+        ? '模型服务连接中断（上游返回不完整），已自动重试仍未成功，请稍后重发或换个问法。'
+        : 'An error occurred while processing your message. Please try again.';
       try {
         await sendMessage({
           apiUrl: config.apiUrl,
           botToken: config.botToken,
           channelId,
           channelType,
-          content: 'An error occurred while processing your message. Please try again.',
+          content,
         });
       } catch {
         /* swallow — don't crash on reply failure */
