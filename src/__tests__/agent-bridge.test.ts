@@ -46,6 +46,7 @@ import {
   summarizeItem,
   buildThreadOptions,
   MAX_TOOL_PARAM_CHARS,
+  isStreamInterruptError,
 } from '../agent-bridge.js';
 import type { Config } from '../config.js';
 
@@ -469,5 +470,252 @@ describe('queryAgent stale-resume recovery', () => {
     // id is still cleared (so next turn starts fresh) but no fresh retry ran.
     expect(cleared).toEqual([true]);
     expect(calls.length).toBe(1);
+  });
+});
+
+// ─── isStreamInterruptError (Step 1) ─────────────────────────────────────────
+describe('isStreamInterruptError', () => {
+  it('matches stream-interrupt phrases', () => {
+    expect(isStreamInterruptError(new Error('stream closed before response.completed'))).toBe(true);
+    expect(isStreamInterruptError(new Error('stream disconnected before completion'))).toBe(true);
+    // Real log text: SDK wraps code 1 but the interrupt phrase is present.
+    expect(
+      isStreamInterruptError(
+        new Error(
+          'Codex Exec exited with code 1: Reconnecting... 1/5 (stream disconnected before completion: stream closed before response.completed)',
+        ),
+      ),
+    ).toBe(true);
+  });
+  it('is case-insensitive and accepts a raw string', () => {
+    expect(isStreamInterruptError('STREAM CLOSED BEFORE RESPONSE.COMPLETED')).toBe(true);
+  });
+  it('does NOT match non-interrupt errors', () => {
+    // A bare code-1 exit with no interrupt phrase must NOT be swallowed into recovery.
+    expect(isStreamInterruptError(new Error('Codex Exec exited with code 1: bad config'))).toBe(false);
+    expect(isStreamInterruptError(new Error('rate limit exceeded, retry later'))).toBe(false);
+    expect(isStreamInterruptError(new Error('thread not found'))).toBe(false);
+    expect(isStreamInterruptError(new Error('no session found'))).toBe(false);
+    expect(isStreamInterruptError(new Error('codex item error'))).toBe(false);
+  });
+});
+
+// ─── stream-interrupt recovery (Step 3) ──────────────────────────────────────
+const STREAM_ERR = 'stream closed before response.completed';
+describe('queryAgent stream-interrupt recovery', () => {
+  it('recovers by resuming the same thread after a mid-turn stream interrupt', async () => {
+    scriptedRuns = [
+      async function* () {
+        yield started('tid-1');
+        yield cmd('c1', 'ls', 'completed'); // side effect happened
+        throw new Error(STREAM_ERR);
+      },
+      async function* () {
+        // recovery run: resumes tid-1, no command re-run
+        yield msg('m1', 'final answer');
+        yield turnDone;
+      },
+    ];
+    const out = await collect(queryAgent('hi', cfg(), undefined, undefined, {}));
+    expect(out.join('')).toBe('final answer');
+    expect(calls.length).toBe(2);
+    expect(calls[1]).toMatchObject({ kind: 'resume', resumeId: 'tid-1' });
+  });
+
+  it('does NOT recover a non-interrupt error (no resume available)', async () => {
+    scriptedRuns = [
+      async function* () {
+        yield started('tid-1');
+        throw new Error('rate limit exceeded');
+      },
+    ];
+    await expect(collect(queryAgent('hi', cfg(), undefined, undefined, {}))).rejects.toThrow(
+      /rate limit/,
+    );
+    expect(calls.length).toBe(1);
+  });
+
+  it('recovers at most once (recovery run interrupts again → throws)', async () => {
+    scriptedRuns = [
+      async function* () {
+        yield started('tid-1');
+        throw new Error(STREAM_ERR);
+      },
+      async function* () {
+        // recovery run also interrupts
+        throw new Error(STREAM_ERR);
+      },
+    ];
+    await expect(collect(queryAgent('hi', cfg(), undefined, undefined, {}))).rejects.toThrow();
+    expect(calls.length).toBe(2); // no third attempt
+  });
+
+  it('recovers using opts.resume when interrupt hits before thread.started', async () => {
+    scriptedRuns = [
+      async function* () {
+        // no thread.started emitted before the interrupt
+        throw new Error(STREAM_ERR);
+      },
+      async function* () {
+        yield msg('m1', 'ok');
+        yield turnDone;
+      },
+    ];
+    const out = await collect(
+      queryAgent('hi', cfg(), undefined, undefined, { resume: 'prev-tid' }),
+    );
+    expect(out.join('')).toBe('ok');
+    expect(calls.length).toBe(2);
+    expect(calls[1]).toMatchObject({ kind: 'resume', resumeId: 'prev-tid' });
+  });
+
+  it('cannot recover a fresh turn interrupted before thread.started', async () => {
+    scriptedRuns = [
+      async function* () {
+        // fresh (no opts.resume), no thread.started, immediate interrupt
+        throw new Error(STREAM_ERR);
+      },
+    ];
+    await expect(collect(queryAgent('hi', cfg(), undefined, undefined, {}))).rejects.toThrow();
+    expect(calls.length).toBe(1); // cap.threadId undefined → no recovery
+  });
+
+  it('stale-resume → fresh-retry → stream interrupt recovers on the fresh thread id, not the stale one', async () => {
+    const cleared: boolean[] = [];
+    scriptedRuns = [
+      async function* () {
+        // main run: resume a stale id → resume error (not a stream interrupt)
+        throw new Error('thread not found');
+      },
+      async function* () {
+        // fresh-retry run: gets a NEW thread id, does work, then interrupts
+        yield started('fresh-tid');
+        yield cmd('c1', 'ls', 'completed');
+        throw new Error(STREAM_ERR);
+      },
+      async function* () {
+        // recovery run: must resume the FRESH id, not the stale opts.resume
+        yield msg('m1', 'recovered answer');
+        yield turnDone;
+      },
+    ];
+    const out = await collect(
+      queryAgent('hi', cfg(), undefined, undefined, {
+        resume: 'stale-tid',
+        onResumeFailed: () => cleared.push(true),
+        fallbackRetryPrompt: 'history + hi',
+      }),
+    );
+    expect(out.join('')).toBe('recovered answer');
+    expect(cleared).toEqual([true]);
+    expect(calls.length).toBe(3);
+    expect(calls[1]).toMatchObject({ kind: 'start' });
+    expect(calls[2]).toMatchObject({ kind: 'resume', resumeId: 'fresh-tid' });
+  });
+
+  it('does NOT recover with a stale id when fresh-retry interrupts before thread.started', async () => {
+    const cleared: boolean[] = [];
+    scriptedRuns = [
+      async function* () {
+        throw new Error('thread not found');
+      },
+      async function* () {
+        // fresh-retry interrupts BEFORE thread.started → cap.threadId stays undefined
+        throw new Error(STREAM_ERR);
+      },
+    ];
+    await expect(
+      collect(
+        queryAgent('hi', cfg(), undefined, undefined, {
+          resume: 'stale-tid',
+          onResumeFailed: () => cleared.push(true),
+          fallbackRetryPrompt: 'history + hi',
+        }),
+      ),
+    ).rejects.toThrow();
+    expect(cleared).toEqual([true]);
+    // main(resume stale-tid) + fresh-retry(start) = 2; NO third recovery call.
+    expect(calls.length).toBe(2);
+    expect(calls[0]).toMatchObject({ kind: 'resume', resumeId: 'stale-tid' });
+    expect(calls[1]).toMatchObject({ kind: 'start' });
+  });
+
+  it('recovery run failing with a resume error does not trigger another recovery', async () => {
+    scriptedRuns = [
+      async function* () {
+        yield started('tid-1');
+        throw new Error(STREAM_ERR);
+      },
+      async function* () {
+        // recovery run throws a resume-type error; must NOT loop into more recovery
+        throw new Error('thread not found');
+      },
+    ];
+    await expect(collect(queryAgent('hi', cfg(), undefined, undefined, {}))).rejects.toThrow();
+    expect(calls.length).toBe(2);
+  });
+
+  it('bounds stream recovery to once across a recovery→fresh-retry→re-interrupt chain', async () => {
+    const cleared: boolean[] = [];
+    scriptedRuns = [
+      async function* () {
+        // main resume run interrupts → recovery
+        yield started('tid-1');
+        throw new Error(STREAM_ERR);
+      },
+      async function* () {
+        // recovery run throws a resume error with NO side effect → bubbles to the
+        // outer stale-resume branch, which fresh-retries
+        throw new Error('thread not found');
+      },
+      async function* () {
+        // fresh-retry run interrupts again — but recovery is already spent, so it
+        // must NOT recover a second time
+        yield started('fresh-tid');
+        throw new Error(STREAM_ERR);
+      },
+    ];
+    await expect(
+      collect(
+        queryAgent('hi', cfg(), undefined, undefined, {
+          resume: 'tid-1',
+          onResumeFailed: () => cleared.push(true),
+          fallbackRetryPrompt: 'history + hi',
+        }),
+      ),
+    ).rejects.toThrow();
+    expect(cleared).toEqual([true]);
+    // main(resume) + recovery(resume) + fresh-retry(start) = 3; no 4th call.
+    expect(calls.length).toBe(3);
+    expect(calls[2]).toMatchObject({ kind: 'start' });
+  });
+
+  it('recovery run side effect blocks an outer fresh-retry', async () => {
+    const cleared: boolean[] = [];
+    scriptedRuns = [
+      async function* () {
+        // main resume run interrupts → recovery
+        yield started('tid-1');
+        throw new Error(STREAM_ERR);
+      },
+      async function* () {
+        // recovery run does a side effect, then fails with a resume error
+        yield cmd('c1', 'ls', 'completed');
+        throw new Error('thread not found');
+      },
+    ];
+    await expect(
+      collect(
+        queryAgent('hi', cfg(), undefined, undefined, {
+          resume: 'tid-1',
+          onResumeFailed: () => cleared.push(true),
+          fallbackRetryPrompt: 'history + hi',
+        }),
+      ),
+    ).rejects.toThrow();
+    // sideEffect.seen carried from recovery run → outer must NOT fresh-retry.
+    // calls: main(resume) + recovery(resume) = 2, no fresh start.
+    expect(calls.length).toBe(2);
+    expect(calls.some((c) => c.kind === 'start')).toBe(false);
   });
 });

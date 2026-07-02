@@ -269,6 +269,26 @@ function isSideEffectItem(type: ThreadItem['type']): boolean {
 }
 
 /**
+ * True when an error is an upstream *stream interrupt* — the codex↔model SSE
+ * stream was cut before the response completed and codex's own reconnect
+ * attempts were exhausted. These are recoverable by resuming the SAME thread
+ * (the work already done is in the thread history), so they get special
+ * handling distinct from a stale-resume error.
+ *
+ * Matches ONLY the interrupt-specific phrases. A bare "Codex Exec exited with
+ * code 1" is NOT matched on its own: the SDK wraps ANY non-zero subprocess exit
+ * (bad config, bad args, model error) in that prefix, so matching it would
+ * wrongly funnel unrelated failures into resume-recovery. The real interrupt
+ * text always carries one of the phrases below (e.g. the log line
+ * "Reconnecting... 1/5 (stream disconnected before completion: stream closed
+ * before response.completed)").
+ */
+export function isStreamInterruptError(err: unknown): boolean {
+  const m = err instanceof Error ? err.message : String(err);
+  return /stream closed before response\.completed|stream disconnected before completion/i.test(m);
+}
+
+/**
  * Query Codex with the given user message.
  *
  * - The frozen security/operator text is written to <cwd>/AGENTS.md and restated
@@ -356,6 +376,7 @@ export async function* queryAgent(
     resumeId: string | undefined,
     prompt: string,
     sideEffect: { seen: boolean },
+    cap: { threadId?: string },
   ): AsyncIterable<string> {
     const thread = resumeId
       ? codex.resumeThread(resumeId, threadOpts)
@@ -373,6 +394,11 @@ export async function* queryAgent(
     for await (const ev of events as AsyncIterable<ThreadEvent>) {
       switch (ev.type) {
         case 'thread.started': {
+          if (ev.thread_id) {
+            // Capture the real thread id for this run so a mid-turn stream
+            // interrupt can resume THIS thread (not a stale prior id).
+            cap.threadId = ev.thread_id;
+          }
           if (!reportedSessionId && opts?.onSessionId && ev.thread_id) {
             reportedSessionId = true;
             try {
@@ -460,8 +486,44 @@ export async function* queryAgent(
   }
 
   const sideEffect = { seen: false };
+  // At most ONE stream-interrupt recovery per queryAgent call, shared across the
+  // main run and any stale-resume fresh-retry so the two paths can't stack a
+  // second recovery.
+  let streamRecovered = false;
+
+  // Wrap a run so an upstream stream interrupt (see isStreamInterruptError) is
+  // recovered ONCE by resuming the SAME thread with a lightweight continuation
+  // prompt. The work already done lives in the thread history, so the resume
+  // continues rather than re-running commands (no duplicated side effects). Each
+  // run gets its own `cap` so the recoverable id is this run's real thread id
+  // (never a stale prior id); the recovery run reuses the same `sideEffect` so
+  // an outer stale-resume fresh-retry sees any side effect it produced.
+  async function* runWithStreamRecovery(
+    resumeId: string | undefined,
+    prompt: string,
+    se: { seen: boolean },
+  ): AsyncIterable<string> {
+    const cap: { threadId?: string } = { threadId: resumeId };
+    try {
+      yield* runOnce(resumeId, prompt, se, cap);
+    } catch (err) {
+      if (isStreamInterruptError(err) && !streamRecovered && cap.threadId) {
+        streamRecovered = true;
+        console.error(
+          `[codex-channel-octo] upstream stream interrupted — resuming thread ${cap.threadId} to continue: ${String(err)}`,
+        );
+        const continuationPrompt = `${SECURITY_PROMPT_PREFIX}\n\n---\n\n上次回复因连接中断未完成。请基于你已经完成的工作，直接继续并给出最终结论，不要重复已执行过的步骤。`;
+        // Recovery run is OUTSIDE the try above: a second interrupt propagates
+        // rather than triggering another recovery (bounded to one).
+        yield* runOnce(cap.threadId, continuationPrompt, se, { threadId: cap.threadId });
+        return;
+      }
+      throw err;
+    }
+  }
+
   try {
-    yield* runOnce(opts?.resume, promptText, sideEffect);
+    yield* runWithStreamRecovery(opts?.resume, promptText, sideEffect);
   } catch (err) {
     // Stale/expired resume that failed BEFORE any side effect: clear the bad id
     // and retry once WITHOUT resume, using the caller's pre-assembled fallback
@@ -478,7 +540,9 @@ export async function* queryAgent(
       const retryPrompt = opts.fallbackRetryPrompt
         ? `${SECURITY_PROMPT_PREFIX}\n\n---\n\n${opts.fallbackRetryPrompt}`
         : promptText;
-      yield* runOnce(undefined, retryPrompt, { seen: false });
+      // Fresh-retry also goes through recovery (shares streamRecovered), so a
+      // stream interrupt on the fresh thread can still be resumed once.
+      yield* runWithStreamRecovery(undefined, retryPrompt, sideEffect);
       return;
     }
     // Resume error after a side effect: do NOT retry (would duplicate work), but
