@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session cwd, the config/SOUL tree, `groupConfigDir`, the memory dir, or
   `codexHome` — so a writable root can never overlap the agent's trust anchors.
 
+### Fixed
+
+- Keep reading Codex replies after the known model-metadata fallback notice,
+  logging it as a warning while continuing to surface other error items.
+- Recover stale threads reported as `no rollout found` by clearing the invalid
+  mapping and retrying once on a fresh thread when no side effect has occurred.
+
 ## [0.1.0] - 2026-06-29
 
 First, early test release. Bridges OpenAI Codex (via `@openai/codex-sdk`) to

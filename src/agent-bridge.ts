@@ -365,7 +365,7 @@ export async function* queryAgent(
   // limits, CLI usage echoes, subprocess stderr) and wrongly drop a valid thread.
   const isResumeError = (err: unknown): boolean => {
     const m = err instanceof Error ? err.message : String(err);
-    return /thread.*not.*found|no (conversation|session|thread) found|invalid.*(thread|session)|session.*not.*found|--resume requires a valid/i.test(m);
+    return /thread.*not.*found|no (conversation|session|thread|rollout) found|invalid.*(thread|session)|session.*not.*found|--resume requires a valid/i.test(m);
   };
 
   // Drain one Codex run. Tracks `sideEffect.seen`: set true on ANY command/file/
@@ -443,13 +443,21 @@ export async function* queryAgent(
             if (!messages.has(item.id)) order.push(item.id);
             messages.set(item.id, item.text);
           } else if (item.type === 'error') {
-            // An ErrorItem is a non-fatal error reported AS an item (distinct
-            // from the stream-level 'error' event). Codex may report a failed
-            // tool/model step this way without failing the whole turn. Surface
-            // it as a thrown error so the turn doesn't silently produce zero
-            // output (which would look like "no response") and so stale-resume
-            // detection can run. Any side effect already seen suppresses retry.
-            throw new Error(item.message ?? 'codex item error');
+            const itemMsg = item.message ?? 'codex item error';
+            // Codex reports unknown-model metadata as an error item before
+            // turn.started, then continues using fallback metadata. Drain this
+            // known notice so the real reply is reached. Require both phrases
+            // at the start; unrelated fallback failures must still throw.
+            if (/^Model metadata for `[^`\r\n]+` not found\. Defaulting to fallback metadata(?:[.;]|$)/i.test(itemMsg)) {
+              console.warn(`[codex-channel-octo] non-fatal codex notice: ${itemMsg}`);
+            } else {
+              // A genuine failed tool/model step reported AS an item (distinct
+              // from the stream-level 'error' event). Surface it as a thrown
+              // error so the turn doesn't silently produce zero output (which
+              // would look like "no response") and so stale-resume detection can
+              // run. Any side effect already seen suppresses retry.
+              throw new Error(itemMsg);
+            }
           } else if (
             (item.type === 'reasoning' || item.type === 'todo_list') &&
             onToolUse &&
