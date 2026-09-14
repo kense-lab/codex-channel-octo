@@ -75,6 +75,8 @@ async function collect(it: AsyncIterable<string>): Promise<string[]> {
 // Event helpers
 const started = (id: string): Ev => ({ type: 'thread.started', thread_id: id });
 const turnDone: Ev = { type: 'turn.completed', usage: {} };
+const metadataNotice = 'Model metadata for `gpt-5.6-terra` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.';
+const missingRolloutError = 'Codex Exec exited with code 1: Reading prompt from stdin...\nError: thread/resume: thread/resume failed: no rollout found for thread id 00000000-0000-4000-8000-000000000001 (code -32600)';
 const msg = (id: string, text: string): Ev => ({
   type: 'item.completed',
   item: { id, type: 'agent_message', text },
@@ -284,6 +286,60 @@ describe('queryAgent event mapping', () => {
     await expect(collect(queryAgent('hi', cfg()))).rejects.toThrow('tool blew up');
   });
 
+  it('drains a metadata fallback notice before turn.started and returns the real reply', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const onResumeFailed = vi.fn();
+    const onSessionId = vi.fn();
+    let drained = false;
+    scriptedRuns = [async function* () {
+      yield started('valid-tid');
+      yield { type: 'item.completed', item: { id: 'e1', type: 'error', message: metadataNotice } };
+      yield { type: 'turn.started' };
+      yield msg('m1', '收到');
+      yield turnDone;
+      drained = true;
+    }];
+    try {
+      const out = await collect(queryAgent('hi', cfg(), undefined, undefined, {
+        resume: 'valid-tid', onResumeFailed, onSessionId,
+      }));
+      expect(out).toEqual(['收到']);
+      expect(drained).toBe(true);
+      expect(warn).toHaveBeenCalledWith(`[codex-channel-octo] non-fatal codex notice: ${metadataNotice}`);
+      expect(onSessionId).toHaveBeenCalledWith('valid-tid');
+      expect(onResumeFailed).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([
+    'Defaulting to fallback provider failed: authentication required',
+    'Model metadata for `custom-model` not found. Unable to continue.',
+    'Request failed: Model metadata for `custom-model` not found. Defaulting to fallback metadata;',
+  ])('still throws for a genuine error resembling a fallback notice: %s', async (message) => {
+    scriptedRuns = [async function* () {
+      yield started('tid');
+      yield { type: 'item.completed', item: { id: 'e1', type: 'error', message } };
+      yield msg('m1', 'must not be returned');
+      yield turnDone;
+    }];
+    await expect(collect(queryAgent('hi', cfg()))).rejects.toThrow(message);
+    expect(calls).toHaveLength(1);
+  });
+
+  it.each(['turn.failed', 'error'])('still throws on %s after a benign metadata notice', async (type) => {
+    scriptedRuns = [async function* () {
+      yield started('tid');
+      yield { type: 'item.completed', item: { id: 'e1', type: 'error', message: metadataNotice } };
+      yield { type: 'turn.started' };
+      yield { type, message: 'authentication failed', error: { message: 'authentication failed' } };
+    }];
+    await expect(collect(queryAgent('hi', cfg()))).rejects.toThrow('authentication failed');
+    expect(calls).toHaveLength(1);
+  });
+
   it('handles item.updated as a snapshot overwrite for agent_message', async () => {
     scriptedRuns = [async function* () {
       yield started('tid');
@@ -420,14 +476,15 @@ describe('isResumeError discrimination (via recovery behavior)', () => {
   });
 });
 
-describe('queryAgent stale-resume recovery', () => {
+describe.each(['thread not found', missingRolloutError])('queryAgent stale-resume recovery: %s', (resumeError) => {
   it('retries fresh (with fallback prompt) when resume fails before any side effect', async () => {
     const cleared: boolean[] = [];
+    const sessionIds: string[] = [];
     scriptedRuns = [
       // run 1: resume — fails immediately, no output/side-effect
       async function* () {
         yield started('tid');
-        throw new Error('thread not found');
+        throw new Error(resumeError);
       },
       // run 2: fresh retry — succeeds
       async function* () {
@@ -440,11 +497,14 @@ describe('queryAgent stale-resume recovery', () => {
       queryAgent('hi', cfg(), undefined, undefined, {
         resume: 'dead',
         onResumeFailed: () => cleared.push(true),
+        onSessionId: (id) => sessionIds.push(id),
         fallbackRetryPrompt: 'history + hi',
       }),
     );
     expect(out.join('')).toBe('recovered');
     expect(cleared).toEqual([true]);
+    expect(sessionIds).toEqual(['tid', 'new-tid']);
+    expect(calls).toHaveLength(2);
     expect(calls[0]).toMatchObject({ kind: 'resume', resumeId: 'dead' });
     expect(calls[1]).toMatchObject({ kind: 'start' });
   });
@@ -455,7 +515,7 @@ describe('queryAgent stale-resume recovery', () => {
       async function* () {
         yield started('tid');
         yield cmd('c1', 'touch x', 'completed'); // side effect!
-        throw new Error('thread not found');
+        throw new Error(resumeError);
       },
     ];
     await expect(
@@ -470,6 +530,20 @@ describe('queryAgent stale-resume recovery', () => {
     // id is still cleared (so next turn starts fresh) but no fresh retry ran.
     expect(cleared).toEqual([true]);
     expect(calls.length).toBe(1);
+  });
+
+  it('does not loop when the fresh retry also fails', async () => {
+    const onResumeFailed = vi.fn();
+    const fail = async function* () {
+      yield { type: 'error', message: resumeError };
+    };
+    scriptedRuns = [fail, fail];
+    await expect(collect(queryAgent('hi', cfg(), undefined, undefined, {
+      resume: 'dead', onResumeFailed,
+    }))).rejects.toThrow(resumeError);
+    expect(onResumeFailed).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toMatchObject({ kind: 'start' });
   });
 });
 
