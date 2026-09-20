@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionRouter } from '../session-router.js';
+import { MentionPreferences } from '../mention-prefs.js';
 import { getGroupMembers, getMentionPreference } from '../octo/api.js';
 import type { Config } from '../config.js';
 import { ChannelType, MessageType, type BotMessage } from '../octo/types.js';
@@ -48,8 +49,44 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+});
+
+describe('mention lookup diagnostics', () => {
+  it('throttles failures across groups and invalidations without logging server data or credentials', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const prefs = new MentionPreferences(config());
+    fetchMock.mockRejectedValue(new Error('private response containing test-bot-token'));
+    expect(await prefs.allows(GROUP, USER)).toBe(false);
+    prefs.invalidate(GROUP);
+    expect(await prefs.allows(GROUP, USER)).toBe(false);
+    expect(await prefs.allows('other-group', USER)).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('Mention preference lookup failed');
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/private response|test-bot-token/);
+
+    vi.advanceTimersByTime(30_000);
+    expect(await prefs.allows(GROUP, USER)).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('distinguishes a failed member lookup from an explicit server veto', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const prefs = new MentionPreferences(config());
+    server({ effective: false });
+    expect(await prefs.allows(GROUP, USER)).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+
+    prefs.invalidate(GROUP);
+    fetchMock.mockImplementation(async (url) => String(url).endsWith('/mention_pref')
+      ? json({ effective: true }) : json({ error: 'unauthorized' }, 401));
+    expect(await prefs.allows(GROUP, USER)).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('Mention member roster lookup failed');
+  });
 });
 
 describe('server-controlled mention gate', () => {

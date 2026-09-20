@@ -4,6 +4,7 @@ import { getGroupMembers, getMentionPreference } from './octo/api.js';
 
 const CACHE_TTL_MS = 30_000;
 const MAX_CACHED_GROUPS = 512;
+const WARNING_INTERVAL_MS = 30_000;
 
 interface GroupDecision {
   effective: boolean;
@@ -19,6 +20,7 @@ interface CacheEntry {
 /** One cache per router/bot: preferences and member classification never cross credentials. */
 export class MentionPreferences {
   private readonly cache = new Map<string, CacheEntry>();
+  private nextWarningAt = 0;
 
   constructor(private readonly config: Pick<Config, 'apiUrl' | 'botToken'>) {}
 
@@ -52,9 +54,11 @@ export class MentionPreferences {
 
   private async load(groupNo: string): Promise<GroupDecision> {
     const denied: GroupDecision = { effective: false, members: new Set(), humans: new Set() };
+    let stage = 'preference';
     try {
       const params = { apiUrl: this.config.apiUrl, botToken: this.config.botToken, groupNo };
       if (!await getMentionPreference(params)) return denied;
+      stage = 'member roster';
       const members = await getGroupMembers({ ...params, signal: AbortSignal.timeout(5000) });
       const ids = new Set<string>();
       const humans = new Set<string>();
@@ -73,6 +77,13 @@ export class MentionPreferences {
     } catch {
       // Errors (including timeout, missing endpoint, and bad JSON) keep the @ gate.
       // Cache the failure briefly so every message does not retry a broken endpoint.
+      // Throttle across groups and invalidations, per bot. Never log the raw
+      // error: server responses can echo credentials or other private data.
+      const now = Date.now();
+      if (now >= this.nextWarningAt) {
+        this.nextWarningAt = now + WARNING_INTERVAL_MS;
+        console.warn(`[codex-channel-octo] Mention ${stage} lookup failed; requiring @. Check the bot's API endpoint, authentication, and server response.`);
+      }
       return denied;
     }
   }
