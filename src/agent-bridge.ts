@@ -444,11 +444,11 @@ export async function* queryAgent(
             messages.set(item.id, item.text);
           } else if (item.type === 'error') {
             const itemMsg = item.message ?? 'codex item error';
-            // Codex reports unknown-model metadata as an error item before
-            // turn.started, then continues using fallback metadata. Drain this
-            // known notice so the real reply is reached. Require both phrases
-            // at the start; unrelated fallback failures must still throw.
-            if (/^Model metadata for `[^`\r\n]+` not found\. Defaulting to fallback metadata(?:[.;]|$)/i.test(itemMsg)) {
+            // Codex reports metadata fallback and a resumed session's model
+            // change as error items, then continues the turn. Drain only these
+            // known notices; genuine tool/model failures must still throw.
+            const modelChanged = /^This session was recorded with model `([^`\r\n]+)` but is resuming with `[^`\r\n]+`\. Consider switching back to `\1` as it may affect Codex performance\.$/.test(itemMsg);
+            if (modelChanged || /^Model metadata for `[^`\r\n]+` not found\. Defaulting to fallback metadata(?:[.;]|$)/i.test(itemMsg)) {
               console.warn(`[codex-channel-octo] non-fatal codex notice: ${itemMsg}`);
             } else {
               // A genuine failed tool/model step reported AS an item (distinct

@@ -1,7 +1,7 @@
 // Forked from openclaw-channel-octo v1.0.13 (2026-06-04)
 // Source: https://github.com/Mininglamp-OSS/openclaw-channel-octo
 // Removed: COS upload, GROUP.md API, OBO, rich text, media, thread/group management,
-//          read receipts, bot groups list, group info, mention prefs, space members.
+//          read receipts, bot groups list, group info, space members.
 
 import {
   ChannelType,
@@ -10,6 +10,7 @@ import {
   type SendMessageResult,
 } from "./types.js";
 import { randomUUID } from "node:crypto";
+import { parentGroupNo } from '../channel-id.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -305,6 +306,27 @@ export async function sendReadReceipt(params: {
   }, params.signal);
 }
 
+// ─── Group Mention Preference ───────────────────────────────────────────────
+
+/** The server decides AI-session exceptions and ordinary groups' two-axis policy. */
+export async function getMentionPreference(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+}): Promise<boolean> {
+  const data = await getJson<Record<string, unknown> | null>(
+    params.apiUrl,
+    params.botToken,
+    `/v1/bot/groups/${encodeURIComponent(parentGroupNo(params.groupNo))}/mention_pref`,
+    AbortSignal.timeout(5000),
+  );
+  const enabled = (value: unknown): boolean => value === true || value === 1;
+  if (data?.effective !== undefined) return enabled(data.effective);
+  // Older servers expose only no_mention; an explicit group veto still wins.
+  return enabled(data?.no_mention)
+    && (data?.group_allow_no_mention === undefined || enabled(data.group_allow_no_mention));
+}
+
 // ─── Group Members ──────────────────────────────────────────────────────────
 
 export interface GroupMember {
@@ -320,11 +342,13 @@ export async function getGroupMembers(params: {
   apiUrl: string;
   botToken: string;
   groupNo: string;
+  signal?: AbortSignal;
 }): Promise<GroupMember[]> {
   const data = await getJson<Record<string, unknown>>(
     params.apiUrl,
     params.botToken,
-    `/v1/bot/groups/${params.groupNo}/members`,
+    `/v1/bot/groups/${encodeURIComponent(parentGroupNo(params.groupNo))}/members`,
+    params.signal,
   );
   const members = Array.isArray(data?.members)
     ? data.members

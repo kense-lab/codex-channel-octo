@@ -76,6 +76,7 @@ async function collect(it: AsyncIterable<string>): Promise<string[]> {
 const started = (id: string): Ev => ({ type: 'thread.started', thread_id: id });
 const turnDone: Ev = { type: 'turn.completed', usage: {} };
 const metadataNotice = 'Model metadata for `gpt-5.6-terra` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.';
+const modelChangeNotice = 'This session was recorded with model `gpt-5.5` but is resuming with `gpt-6-astra`. Consider switching back to `gpt-5.5` as it may affect Codex performance.';
 const missingRolloutError = 'Codex Exec exited with code 1: Reading prompt from stdin...\nError: thread/resume: thread/resume failed: no rollout found for thread id 00000000-0000-4000-8000-000000000001 (code -32600)';
 const msg = (id: string, text: string): Ev => ({
   type: 'item.completed',
@@ -286,14 +287,14 @@ describe('queryAgent event mapping', () => {
     await expect(collect(queryAgent('hi', cfg()))).rejects.toThrow('tool blew up');
   });
 
-  it('drains a metadata fallback notice before turn.started and returns the real reply', async () => {
+  it.each([metadataNotice, modelChangeNotice])('drains a non-fatal notice before turn.started and returns the real reply: %s', async (notice) => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const onResumeFailed = vi.fn();
     const onSessionId = vi.fn();
     let drained = false;
     scriptedRuns = [async function* () {
       yield started('valid-tid');
-      yield { type: 'item.completed', item: { id: 'e1', type: 'error', message: metadataNotice } };
+      yield { type: 'item.completed', item: { id: 'e1', type: 'error', message: notice } };
       yield { type: 'turn.started' };
       yield msg('m1', '收到');
       yield turnDone;
@@ -305,7 +306,7 @@ describe('queryAgent event mapping', () => {
       }));
       expect(out).toEqual(['收到']);
       expect(drained).toBe(true);
-      expect(warn).toHaveBeenCalledWith(`[codex-channel-octo] non-fatal codex notice: ${metadataNotice}`);
+      expect(warn).toHaveBeenCalledWith(`[codex-channel-octo] non-fatal codex notice: ${notice}`);
       expect(onSessionId).toHaveBeenCalledWith('valid-tid');
       expect(onResumeFailed).not.toHaveBeenCalled();
       expect(calls).toHaveLength(1);
@@ -318,6 +319,10 @@ describe('queryAgent event mapping', () => {
     'Defaulting to fallback provider failed: authentication required',
     'Model metadata for `custom-model` not found. Unable to continue.',
     'Request failed: Model metadata for `custom-model` not found. Defaulting to fallback metadata;',
+    'This session was recorded with model `gpt-5.5` but is resuming with `gpt-6-astra`. Authentication failed.',
+    `Request failed: ${modelChangeNotice}`,
+    `${modelChangeNotice} Authentication failed.`,
+    modelChangeNotice.replace('switching back to `gpt-5.5`', 'switching back to `other-model`'),
   ])('still throws for a genuine error resembling a fallback notice: %s', async (message) => {
     scriptedRuns = [async function* () {
       yield started('tid');
@@ -329,10 +334,12 @@ describe('queryAgent event mapping', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it.each(['turn.failed', 'error'])('still throws on %s after a benign metadata notice', async (type) => {
+  it.each([metadataNotice, modelChangeNotice].flatMap((notice) =>
+    ['turn.failed', 'error'].map((type) => ({ notice, type })),
+  ))('still throws on $type after a benign notice: $notice', async ({ notice, type }) => {
     scriptedRuns = [async function* () {
       yield started('tid');
-      yield { type: 'item.completed', item: { id: 'e1', type: 'error', message: metadataNotice } };
+      yield { type: 'item.completed', item: { id: 'e1', type: 'error', message: notice } };
       yield { type: 'turn.started' };
       yield { type, message: 'authentication failed', error: { message: 'authentication failed' } };
     }];

@@ -177,7 +177,7 @@ export interface Config {
    * the `_bot` heuristic. Use this to whitelist trusted bots.
    */
   allowedBotUids?: string[];
-  /** Group IDs where the bot responds without being @mentioned (G12). */
+  /** Explicit exact-channel no-@ overrides; server group preferences are also consulted. */
   mentionFreeGroups?: string[];
   /**
    * v0.3 multi-bot: optional per-bot overrides. When present and non-empty, the

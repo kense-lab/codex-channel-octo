@@ -58,6 +58,27 @@ Each bot has its own `CODEX_HOME` (`<id>/codex-home`) by default and must be aut
 
 > An unauthenticated isolated home falls back to `api.openai.com` and returns 401.
 
+### Group and topic mentions
+
+The frontend's per-group no-@ reply toggle is supported without editing the
+channel config. Enabling it permits ordinary group messages; disabling it
+restores the mention requirement, unless a local override applies.
+
+The channel reads `GET /v1/bot/groups/{parentGroupId}/mention_pref` before
+answering an unmentioned group/topic message. The server's `effective` decision
+controls automatic no-@ replies, including AI private sessions. Topics inherit
+their parent's preference while retaining separate conversation histories.
+
+Automatic no-@ replies require a confirmed human member. Other bots still need
+an explicit mention unless listed in `allowedBotUids`. API failures or unknown
+member classification keep the mention requirement. Preferences and member
+classification are cached per bot and parent group for 30 seconds;
+`mention_pref_updated` events invalidate that parent's cache.
+
+Existing `mentionFreeGroups` entries remain explicit operator overrides matched
+against the full channel ID. AI sessions covered by the server policy do not
+need individual topic IDs added to this list.
+
 ## Run
 
 ```bash

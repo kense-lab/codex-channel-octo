@@ -58,6 +58,22 @@ npm install -g @mininglamp-oss/codex-channel-octo
 
 > 未鉴权的独立 home 会回退到 `api.openai.com` 并 401。
 
+### 群和话题的免 @ 回复
+
+支持前端「免@回答」页面中的逐群开关，无需手动修改 Channel 配置。
+群内开启后普通消息可触发回复；关闭后恢复为需要 @（本地显式覆盖除外）。
+
+收到未 @ Bot 的群或话题消息时，Channel 会查询
+`GET /v1/bot/groups/{父群ID}/mention_pref`，按服务端的 `effective` 判定是否免 @，
+包括 AI 私人会话。话题继承父群设置，聊天历史仍按话题分别保存。
+
+自动免 @ 只放行服务端明确标记为真人的群成员；其他 Bot 仍需 @，除非已列入
+`allowedBotUids`。接口失败或成员身份不明时，继续要求 @。设置及成员身份按 Bot、
+父群缓存 30 秒，收到 `mention_pref_updated` 事件后清除对应父群缓存。
+
+已有 `mentionFreeGroups` 仍是按完整频道 ID 精确匹配的本地显式覆盖。
+服务端已允许免 @ 的 AI 会话不需要逐个填写话题 ID。
+
 ## 运行
 
 ```bash
