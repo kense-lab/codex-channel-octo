@@ -120,8 +120,8 @@ describe('resolveSandbox', () => {
   it('defaults to read-only', () => {
     expect(resolveSandbox({})).toBe('read-only');
   });
-  it('rejects danger-full-access', () => {
-    expect(() => resolveSandbox({ sandboxMode: 'danger-full-access' })).toThrow();
+  it('honors an explicit danger-full-access opt-out without the workspace-write gate', () => {
+    expect(resolveSandbox({ sandboxMode: 'danger-full-access' })).toBe('danger-full-access');
   });
   it('downgrades workspace-write without allowWorkspaceWrite', () => {
     expect(resolveSandbox({ sandboxMode: 'workspace-write' })).toBe('read-only');
@@ -147,6 +147,17 @@ describe('buildThreadOptions', () => {
     const o = buildThreadOptions(cfg({ webSearchEnabled: true }), '/tmp/x');
     expect(o.webSearchEnabled).toBe(true);
     expect(o.webSearchMode).toBe('live');
+  });
+  it('reports unrestricted network and omits writable roots when sandboxing is disabled', () => {
+    const o = buildThreadOptions(cfg({
+      sandboxMode: 'danger-full-access',
+      networkAccessEnabled: false,
+      additionalDirectories: ['/srv/shared'],
+    }), '/tmp/x');
+    expect(o.sandboxMode).toBe('danger-full-access');
+    expect(o.networkAccessEnabled).toBe(true);
+    expect(o.additionalDirectories).toBeUndefined();
+    expect(o.approvalPolicy).toBe('never');
   });
   it('rejects invalid approvalPolicy', () => {
     expect(() => buildThreadOptions(cfg({ approvalPolicy: 'bogus' }), '/tmp/x')).toThrow();
@@ -416,6 +427,26 @@ describe('queryAgent event mapping', () => {
     // AGENTS.md must never run with write access, including via lingering roots.
     expect(calls[0].opts?.sandboxMode).toBe('read-only');
     expect(calls[0].opts?.additionalDirectories).toBeUndefined();
+  });
+
+  it('stops before starting an unsandboxed turn if AGENTS.md cannot be refreshed', async () => {
+    const c = cfg({ sandboxMode: 'danger-full-access' });
+    c.cwd = '/dev/null/ws';
+    c.cwdBase = '/dev/null/ws';
+    await expect(collect(queryAgent('hi', c))).rejects.toThrow(/AGENTS.md refresh failed/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([undefined, 'tid-existing'])('forwards danger-full-access on fresh/resumed turns (%s)', async (resume) => {
+    scriptedRuns = [async function* () {
+      yield started('tid');
+      yield msg('m', 'ok');
+      yield turnDone;
+    }];
+    await collect(queryAgent('hi', cfg({ sandboxMode: 'danger-full-access' }), undefined, undefined, { resume }));
+    expect(calls[0].opts?.sandboxMode).toBe('danger-full-access');
+    expect(calls[0].opts?.networkAccessEnabled).toBe(true);
+    expect(calls[0].kind).toBe(resume ? 'resume' : 'start');
   });
 
   it('forwards additionalDirectories on the resume path too (shared threadOpts)', async () => {
