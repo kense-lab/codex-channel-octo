@@ -107,7 +107,7 @@ Use [`config.bot.docker.example.json`](./config.bot.docker.example.json) for a d
 { "sdk": { "sandboxMode": "danger-full-access" } }
 ```
 
-This mode does not require `allowWorkspaceWrite` or a network toggle. Restart the Channel after editing and confirm the mode with `/config`. Docker can retain its default seccomp policy; Codex does not need `privileged`, `SYS_ADMIN`, or a custom seccomp profile in this mode. Host and container access restrictions still apply.
+This mode does not require `allowWorkspaceWrite` or a network toggle. Restart the Channel after editing and confirm the mode with `/config`. Docker's default seccomp policy is expected to suffice without `privileged`, `SYS_ADMIN`, or a custom seccomp profile; this has not yet been validated in a live container. Host and container access restrictions still apply.
 
 The program still defaults to `read-only`; detecting Docker never changes permissions automatically. Use a dedicated container for each trust boundary, without host credential or Docker socket mounts. Different bots in the same container no longer have Codex filesystem isolation. If the current turn's `AGENTS.md` cannot be refreshed, that turn stops with an error.
 

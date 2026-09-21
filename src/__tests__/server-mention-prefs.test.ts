@@ -55,6 +55,36 @@ afterEach(() => {
 });
 
 describe('mention lookup diagnostics', () => {
+  it.each([[], null, {}, { members: 'private response containing test-bot-token' }, [{ name: 'missing uid' }]])(
+    'warns on an empty or malformed successful roster and retries after the TTL (%j)', async (members) => {
+      vi.useFakeTimers();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const prefs = new MentionPreferences(config());
+      server({ effective: true }, members);
+      expect(await prefs.allows(GROUP, USER)).toBe(false);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('member roster is empty or malformed');
+      expect(JSON.stringify(warn.mock.calls)).not.toMatch(/private response|test-bot-token/);
+      server();
+      expect(await prefs.allows(GROUP, USER)).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      vi.advanceTimersByTime(30_001);
+      expect(await prefs.allows(GROUP, USER)).toBe(true);
+    },
+  );
+
+  it('warns for missing human classification without rejecting explicitly allowed member bots', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const prefs = new MentionPreferences(config());
+    server({ effective: true }, [{ uid: USER }, { uid: 'trusted_bot', robot: 1 }]);
+    expect(await prefs.allows(GROUP, USER)).toBe(false);
+    expect(await prefs.allows(GROUP, 'trusted_bot', true)).toBe(true);
+    prefs.invalidate(GROUP);
+    expect(await prefs.allows(GROUP, USER)).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain('member roster has no confirmed humans');
+  });
+
   it('throttles failures across groups and invalidations without logging server data or credentials', async () => {
     vi.useFakeTimers();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -161,16 +191,17 @@ describe('server-controlled mention gate', () => {
     expect(await router.route(message())).toBeNull();
   });
 
-  it('invalidates cached permission before filtering an unmentioned preference event', async () => {
-    const router = new SessionRouter(config(), BOT);
+  it.each([USER, 'sibling_bot', 'blocked_bot'])('ignores a forged preference event from %s without invalidating another topic', async (from_uid) => {
+    const router = new SessionRouter(config({ botBlocklist: ['blocked_bot'] }), BOT);
+    router.registerKnownBot('sibling_bot');
     expect((await router.route(message()))?.shouldProcess).toBe(true);
     server({ effective: false });
     expect(await router.route(message({
-      channel_id: GROUP, channel_type: ChannelType.Group,
+      from_uid, channel_id: GROUP, channel_type: ChannelType.Group,
       payload: { type: MessageType.Text, event: { type: 'mention_pref_updated', group_no: 'untrusted-other-group' } },
     }))).toBeNull();
-    expect(await router.route(message({ channel_id: GROUP + '____topic-two' }))).toBeNull();
-    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/mention_pref'))).toHaveLength(2);
+    expect((await router.route(message({ channel_id: GROUP + '____topic-two' })))?.shouldProcess).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it.each([true, false])('applies the frontend toggle immediately after the server sends a self-authored notification (previously %s)', async (effective) => {
@@ -206,11 +237,31 @@ describe('server-controlled mention gate', () => {
     const router = new SessionRouter(config(), BOT);
     const pending = router.route(message());
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    await router.route(message({ channel_id: GROUP, payload: { type: MessageType.Text, event: { type: 'mention_pref_updated' } } }));
+    await router.route(message({ from_uid: BOT, channel_id: GROUP, channel_type: ChannelType.Group, payload: { type: MessageType.Text, event: { type: 'mention_pref_updated' } } }));
     resolvePref(json({ effective: true }));
     expect(await pending).toBeNull();
     server({ effective: false });
     expect(await router.route(message())).toBeNull();
+  });
+
+  it.each([USER, 'sibling_bot', 'blocked_bot'])('does not let %s suppress an in-flight message in another topic', async (from_uid) => {
+    let resolvePref!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => { resolvePref = resolve; }));
+    const router = new SessionRouter(config({ botBlocklist: ['blocked_bot'] }), BOT);
+    router.registerKnownBot('sibling_bot');
+    const handler = vi.fn().mockResolvedValue(undefined);
+    const pending = router.routeAndHandle(message(), handler);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await router.routeAndHandle(message({
+      from_uid, channel_id: GROUP, channel_type: ChannelType.Group,
+      payload: { type: MessageType.Text, event: { type: 'mention_pref_updated' } },
+    }), handler);
+    resolvePref(json({ effective: true }));
+    await pending;
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0].sessionKey).toBe(GROUP + '____topic-one');
+    expect((await router.route(message({ channel_id: GROUP + '____topic-two' })))?.shouldProcess).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('isolates cached decisions across bot credentials', async () => {
@@ -287,9 +338,9 @@ describe('mention preference wire compatibility', () => {
     expect(await new SessionRouter(config(), BOT).route(message())).toBeNull();
   });
 
-  it('uses the encoded parent ID for the shared member API', async () => {
+  it('encodes the caller-resolved group ID without silently changing its scope', async () => {
     server();
     await getGroupMembers({ ...config(), groupNo: 'group/with space____topic' });
-    expect(fetchMock.mock.calls[0][0]).toBe('https://octo.example/api/v1/bot/groups/group%2Fwith%20space/members');
+    expect(fetchMock.mock.calls[0][0]).toBe('https://octo.example/api/v1/bot/groups/group%2Fwith%20space____topic/members');
   });
 });

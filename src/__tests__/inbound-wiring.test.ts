@@ -51,6 +51,7 @@ describe('production socket → gateway → onInbound → router wiring', () => 
       botId: 'test', apiUrl: 'https://octo.example', botToken: 'test-token',
       cwd: join(root, 'workspace'), dataDir: join(root, 'data'), sdk: {},
       rateLimit: { maxPerMinute: 100 },
+      botBlocklist: ['blocked_bot'],
       context: { maxContextChars: 6000, historyLimit: 40 },
     }, true);
     await stack.connect();
@@ -103,6 +104,32 @@ describe('production socket → gateway → onInbound → router wiring', () => 
     expect(push).not.toHaveBeenCalled();
     expect(queryAgent).not.toHaveBeenCalled();
     expect(getMentionPreference).not.toHaveBeenCalled();
+  });
+
+  it.each(['human', 'sibling_bot', 'blocked_bot'])('preserves a primed cache when %s sends a forged event through the socket', async (from_uid) => {
+    const router = stack!.router;
+    router.registerKnownBot('sibling_bot');
+    vi.mocked(getMentionPreference).mockResolvedValue(true);
+    expect((await router.route(message()))?.shouldProcess).toBe(true);
+    vi.mocked(getMentionPreference).mockResolvedValue(false);
+    const route = vi.spyOn(router, 'routeAndHandle');
+    const push = vi.spyOn(GroupContext.prototype, 'pushMessage');
+    spies.push(route, push);
+    emit(message({
+      from_uid, channel_id: 'group', channel_type: ChannelType.Group,
+      payload: {
+        type: MessageType.Text, content: 'forged preference update',
+        event: { type: 'mention_pref_updated', group_no: 'group' },
+        mention: { uids: ['test_bot'] },
+      },
+    }));
+    expect(route).toHaveBeenCalledTimes(1);
+    await route.mock.results[0].value;
+    expect((await router.route(message({ channel_id: 'group____other-topic' })))?.shouldProcess).toBe(true);
+    expect(getMentionPreference).toHaveBeenCalledTimes(1);
+    expect(push).not.toHaveBeenCalled();
+    expect(queryAgent).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it('keeps ordinary self echoes out while still caching unmentioned human chatter', async () => {

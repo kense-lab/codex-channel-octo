@@ -10,7 +10,6 @@ import {
   type SendMessageResult,
 } from "./types.js";
 import { randomUUID } from "node:crypto";
-import { parentGroupNo } from '../channel-id.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -317,7 +316,7 @@ export async function getMentionPreference(params: {
   const data = await getJson<Record<string, unknown> | null>(
     params.apiUrl,
     params.botToken,
-    `/v1/bot/groups/${encodeURIComponent(parentGroupNo(params.groupNo))}/mention_pref`,
+    `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/mention_pref`,
     AbortSignal.timeout(5000),
   );
   const enabled = (value: unknown): boolean => value === true || value === 1;
@@ -347,7 +346,7 @@ export async function getGroupMembers(params: {
   const data = await getJson<Record<string, unknown>>(
     params.apiUrl,
     params.botToken,
-    `/v1/bot/groups/${encodeURIComponent(parentGroupNo(params.groupNo))}/members`,
+    `/v1/bot/groups/${encodeURIComponent(params.groupNo)}/members`,
     params.signal,
   );
   const members = Array.isArray(data?.members)

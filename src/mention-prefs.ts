@@ -73,18 +73,29 @@ export class MentionPreferences {
         else unconfirmed.add(member.uid);
       }
       for (const uid of unconfirmed) humans.delete(uid);
+      if (ids.size === 0) {
+        this.warn('member roster is empty or malformed; requiring @. Check the server response');
+        return denied;
+      }
+      if (humans.size === 0) {
+        this.warn('member roster has no confirmed humans; requiring @ for human messages. Check the server robot flags');
+      }
       return { effective: true, members: ids, humans };
     } catch {
       // Errors (including timeout, missing endpoint, and bad JSON) keep the @ gate.
       // Cache the failure briefly so every message does not retry a broken endpoint.
       // Throttle across groups and invalidations, per bot. Never log the raw
       // error: server responses can echo credentials or other private data.
-      const now = Date.now();
-      if (now >= this.nextWarningAt) {
-        this.nextWarningAt = now + WARNING_INTERVAL_MS;
-        console.warn(`[codex-channel-octo] Mention ${stage} lookup failed; requiring @. Check the bot's API endpoint, authentication, and server response.`);
-      }
+      this.warn(`${stage} lookup failed; requiring @. Check the bot's API endpoint, authentication, and server response`);
       return denied;
     }
+  }
+
+  private warn(reason: string): void {
+    const now = Date.now();
+    if (now < this.nextWarningAt) return;
+    this.nextWarningAt = now + WARNING_INTERVAL_MS;
+    // Callers supply fixed diagnostic text only, never payloads or errors.
+    console.warn(`[codex-channel-octo] Mention ${reason}.`);
   }
 }

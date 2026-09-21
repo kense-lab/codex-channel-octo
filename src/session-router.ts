@@ -351,11 +351,13 @@ export class SessionRouter {
     if (msg.streamOn) return null;
 
     // The server sends preference notifications as the bot itself. Handle
-    // these before the self-message guard, without invoking the agent. They
-    // may be unmentioned; invalidate by the actual channel's parent, never
-    // by an untrusted group_no in the event payload.
+    // these before the self-message guard, without invoking the agent. Other
+    // members can forge event payloads, so only this bot's notifications may
+    // invalidate. Key by the actual channel's parent, never payload.group_no.
     if (msg.payload.event) {
-      if (this.isGroupLike(msg.channel_type) && msg.payload.event.type === 'mention_pref_updated') {
+      if (this.isGroupLike(msg.channel_type)
+        && msg.from_uid === this.robotId
+        && msg.payload.event.type === 'mention_pref_updated') {
         this.mentionPreferences.invalidate(msg.channel_id!);
       }
       return null;

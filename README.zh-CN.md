@@ -102,7 +102,7 @@ IM 输入是**不可信**的,权限边界是 **sandbox**,不是 prompt:
 { "sdk": { "sandboxMode": "danger-full-access" } }
 ```
 
-此模式不需要 `allowWorkspaceWrite` 或额外的网络开关。修改后重启 Channel，发送 `/config` 确认模式。Docker 可保留默认 seccomp，无需为 Codex 添加 `privileged`、`SYS_ADMIN` 或自定义 seccomp；宿主机与容器自身的访问限制仍然适用。
+此模式不需要 `allowWorkspaceWrite` 或额外的网络开关。修改后重启 Channel，发送 `/config` 确认模式。预计 Docker 默认 seccomp 即可运行，无需添加 `privileged`、`SYS_ADMIN` 或自定义 seccomp；这一点尚未在真实容器中验证。宿主机与容器自身的访问限制仍然适用。
 
 程序默认仍是 `read-only`，不会根据 Docker 检测结果自动变更权限。每个信任边界使用独立容器，避免挂载宿主凭据或 Docker socket。关闭 Codex 沙箱后，同一容器中的不同 bot 不再由 Codex 提供文件访问隔离。若本轮 `AGENTS.md` 无法更新，会停止该轮并报告错误。
 
